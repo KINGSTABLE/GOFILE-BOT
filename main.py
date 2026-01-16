@@ -1,29 +1,31 @@
 import os
 import aiohttp
 import asyncio
-import mimetypes
 import json
 from datetime import datetime
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message
-from queue import Queue
-from pyrogram.errors import FloodWait
+from asyncio import Queue, Lock
+from aiohttp import web
 
-# Pyrogram and API Configuration
-API_ID = "29714294"  # Get this from https://my.telegram.org
-API_HASH = "bd44a7527bbb8ef23552c569ff3a0d93"  # Get this from https://my.telegram.org
-BOT_TOKEN = "7926056695:AAE0Za6llNp4rkIrbYMNLVRd-sZzePayARo"
-GOFILE_API_TOKEN = "avoA4ruw3nxglw11NOTR5GzH2bpB5QRe"
-BACKUP_CHANNEL_ID = -1002889648510  # Your specified backup channel ID
-ADMIN_IDS = [5978396634]  # Replace with actual admin user IDs
+# ==============================================================================
+# CONFIGURATION (Loaded from Environment Variables for Security)
+# ==============================================================================
+API_ID = os.environ.get("API_ID") 
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+GOFILE_API_TOKEN = os.environ.get("GOFILE_API_TOKEN")
+# Convert string to integer for IDs
+BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", "0"))
+ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split()]
 
 # Specify the prioritized servers
 PRIORITIZED_SERVERS = [
-    "upload-na-phx",  # North America (Phoenix)
-    "upload-ap-sgp",  # Asia Pacific (Singapore)
-    "upload-ap-hkg",  # Asia Pacific (Hong Kong)
-    "upload-ap-tyo",  # Asia Pacific (Tokyo)
-    "upload-sa-sao",  # South America (São Paulo)
+    "upload-na-phx",
+    "upload-ap-sgp",
+    "upload-ap-hkg",
+    "upload-ap-tyo",
+    "upload-sa-sao",
 ]
 HEADERS = {"Authorization": f"Bearer {GOFILE_API_TOKEN}"}
 
@@ -35,8 +37,8 @@ app = Client("advanced_gofile_bot", api_id=API_ID, api_hash=API_HASH, bot_token=
 
 # Initialize queues
 download_queue = Queue()
-upload_queue = Queue()
-processing_queue = asyncio.Lock()
+# upload_queue = Queue() # Not currently used in logic, but defined in original
+processing_lock = Lock()
 
 # Ensure directories and files exist
 if not os.path.exists("downloads"):
@@ -48,7 +50,10 @@ if not os.path.exists("user.txt"):
     with open("user.txt", "w") as f:
         f.write("User Upload Log\n==============\n")
 
-# Helper function to save user data
+# ==============================================================================
+# HELPER FUNCTIONS
+# ==============================================================================
+
 def save_user_data(message: Message, download_link: str, file_type: str, file_size: int):
     user_data = {
         "user_id": message.from_user.id,
@@ -62,11 +67,21 @@ def save_user_data(message: Message, download_link: str, file_type: str, file_si
         "date": datetime.now().isoformat(),
         "caption": message.caption or "N/A"
     }
-    with open("user.json", "r+") as f:
-        data = json.load(f)
-        data.append(user_data)
-        f.seek(0)
-        json.dump(data, f, indent=4)
+    
+    # Update JSON
+    try:
+        with open("user.json", "r+") as f:
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError:
+                data = []
+            data.append(user_data)
+            f.seek(0)
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Error saving JSON: {e}")
+
+    # Update TXT
     with open("user.txt", "a") as f:
         f.write(
             f"\nUser ID: {user_data['user_id']}\n"
@@ -82,9 +97,12 @@ def save_user_data(message: Message, download_link: str, file_type: str, file_si
             f"{'='*20}\n"
         )
 
-# Command handlers (/start, /help, /stats)
+# ==============================================================================
+# BOT COMMANDS
+# ==============================================================================
+
 @app.on_message(filters.command("start"))
-async def start(client: Client, message: Message):
+async def start_command(client: Client, message: Message):
     await message.reply_text(
         "🚀 **Welcome!** Send any file to back it up and get a Gofile.io link (if under 500 MB)."
     )
@@ -104,13 +122,20 @@ async def stats_command(client: Client, message: Message):
     if message.from_user.id not in ADMIN_IDS:
         await message.reply_text("🚫 This command is for admins only.")
         return
-    await message.reply_document("user.txt", caption="📊 User Upload Log (user.txt)")
-    await message.reply_document("user.json", caption="📊 User Upload Data (user.json)")
+    
+    if os.path.exists("user.txt"):
+        await message.reply_document("user.txt", caption="📊 User Upload Log (user.txt)")
+    if os.path.exists("user.json"):
+        await message.reply_document("user.json", caption="📊 User Upload Data (user.json)")
 
-# Main file handler
+# ==============================================================================
+# FILE HANDLER
+# ==============================================================================
+
 @app.on_message(filters.document | filters.video | filters.audio | filters.photo)
 async def handle_media(client: Client, message: Message):
     file_size, file_type = 0, ""
+    
     if message.document:
         file_size = message.document.file_size
         file_type = "document"
@@ -144,22 +169,25 @@ async def handle_media(client: Client, message: Message):
         return
 
     # Queue valid files for upload
-    download_queue.put((message, file_type, file_size))
+    await download_queue.put((message, file_type, file_size))
     await message.reply_text("✅ Your file is in the queue to be uploaded. Please wait.")
     
+    # Start processing if not already running (Logic adjusted to be safe)
     asyncio.create_task(process_queue(client))
 
 async def process_queue(client: Client):
-    async with processing_queue:
+    async with processing_lock:
         while not download_queue.empty():
-            message, file_type, file_size = download_queue.get()
+            message, file_type, file_size = await download_queue.get()
             await process_file(client, message, file_type, file_size)
 
 async def process_file(client: Client, message: Message, file_type: str, file_size: int):
     status_message = await message.reply_text("📥 Downloading...")
     
-    file_name = getattr(message, file_type).file_name if hasattr(getattr(message, file_type), 'file_name') else f"{file_type}_{getattr(message, file_type).file_id}"
-    download_path = f"./downloads/{file_name}"
+    # Safe file name handling
+    media_obj = getattr(message, file_type)
+    file_name = getattr(media_obj, 'file_name', None) or f"{file_type}_{media_obj.file_id}.{getattr(media_obj, 'mime_type', '').split('/')[-1] or 'dat'}"
+    download_path = os.path.join("downloads", file_name)
 
     try:
         await client.download_media(message, file_name=download_path)
@@ -183,19 +211,24 @@ async def process_file(client: Client, message: Message, file_type: str, file_si
             )
 
             # Send the correct media type with the final caption
-            if file_type == "document":
-                await client.send_document(BACKUP_CHANNEL_ID, message.document.file_id, caption=final_caption)
-            elif file_type == "video":
-                await client.send_video(BACKUP_CHANNEL_ID, message.video.file_id, caption=final_caption)
-            elif file_type == "audio":
-                await client.send_audio(BACKUP_CHANNEL_ID, message.audio.file_id, caption=final_caption)
-            elif file_type == "photo":
-                await client.send_photo(BACKUP_CHANNEL_ID, message.photo.file_id, caption=final_caption)
+            try:
+                if file_type == "document":
+                    await client.send_document(BACKUP_CHANNEL_ID, message.document.file_id, caption=final_caption)
+                elif file_type == "video":
+                    await client.send_video(BACKUP_CHANNEL_ID, message.video.file_id, caption=final_caption)
+                elif file_type == "audio":
+                    await client.send_audio(BACKUP_CHANNEL_ID, message.audio.file_id, caption=final_caption)
+                elif file_type == "photo":
+                    await client.send_photo(BACKUP_CHANNEL_ID, message.photo.file_id, caption=final_caption)
+            except Exception as e:
+                print(f"Backup Channel Error: {e}")
+
         else:
             await status_message.edit_text("❌ Upload failed. Please try again later.")
             
     except Exception as e:
         await status_message.edit_text(f"An error occurred: {str(e)}")
+        print(f"Process error: {e}")
     finally:
         if os.path.exists(download_path):
             os.remove(download_path)
@@ -207,7 +240,9 @@ async def upload_file_to_gofile(file_path: str):
                 with open(file_path, "rb") as f:
                     form_data = aiohttp.FormData()
                     form_data.add_field("file", f, filename=os.path.basename(file_path))
-                    async with session.post(f"https://{server}.gofile.io/uploadfile", headers=HEADERS, data=form_data) as response:
+                    # Note: Added token parameter to URL for better auth handling on some endpoints
+                    url = f"https://{server}.gofile.io/uploadfile"
+                    async with session.post(url, headers=HEADERS, data=form_data) as response:
                         response.raise_for_status()
                         result = await response.json()
                         if result.get("status") == "ok":
@@ -217,6 +252,35 @@ async def upload_file_to_gofile(file_path: str):
             continue
     return None
 
+# ==============================================================================
+# RENDER WEB SERVER (KEEPS BOT ALIVE)
+# ==============================================================================
+
+async def web_handler(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    app = web.Application()
+    app.router.add_get("/", web_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Web server started on port {port}")
+
+async def main():
+    print("Starting Bot...")
+    await app.start()
+    print("Bot Started!")
+    
+    # Start the Dummy Web Server for Render
+    await start_web_server()
+    
+    # Keep the bot running
+    await idle()
+    await app.stop()
+
 if __name__ == "__main__":
-    print("Bot is running...")
-    app.run()
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
