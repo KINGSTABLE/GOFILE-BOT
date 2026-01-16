@@ -1,8 +1,8 @@
+#!/usr/bin/env python3
 import os
 import aiohttp
 import asyncio
 import time
-import json
 import requests
 import mimetypes
 from pyrogram import Client, filters, idle
@@ -17,8 +17,8 @@ API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOFILE_API_TOKEN = os.environ.get("GOFILE_API_TOKEN")
 
-BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID"))
-LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID"))
+BACKUP_CHANNEL_ID = -1003648024683   # GOFILE UPLOADER BOT backup
+LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", -1003648024683))
 
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "5978396634").split()]
 
@@ -53,11 +53,19 @@ processing_lock = Lock()
 # ================== HELPERS ==================
 
 def human_readable_size(size):
-    for unit in ['B','KB','MB','GB','TB']:
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
         if size < 1024:
             return f"{size:.2f} {unit}"
         size /= 1024
     return f"{size:.2f} PB"
+
+def is_forwarded(message):
+    return bool(
+        message.forward_date
+        or message.forward_from
+        or message.forward_from_chat
+        or message.forward_sender_name
+    )
 
 def backup_via_requests(file_path, caption):
     try:
@@ -76,9 +84,10 @@ def backup_via_requests(file_path, caption):
 @app.on_message(filters.command("start"))
 async def start(client, message):
     await message.reply_text(
-        "👋 **Welcome!**\n\n"
+        "👋 **Welcome to GoFile Uploader Bot**\n\n"
         "📤 Send me a file OR\n"
-        "🔗 Use `/upload <url>`"
+        "🔗 Use `/upload <url>`\n\n"
+        "⚠️ Forwarded files are detected."
     )
 
 @app.on_message(filters.command("upload"))
@@ -149,59 +158,65 @@ async def process_url_file(client, url, message, status_msg):
         file_name, "url"
     )
 
-# ================== UPLOAD + FORWARD ==================
+# ================== UPLOAD + FORWARD LOGIC ==================
 
 async def upload_handler(client, message, status_msg, file_path, file_size, file_name, source):
     try:
-        await status_msg.edit_text("⬆️ Uploading to Gofile...")
+        await status_msg.edit_text("⬆️ Uploading to GoFile...")
         link = await upload_to_gofile(file_path)
 
         if not link:
             return await status_msg.edit_text("❌ Upload failed")
 
-        # ===== USER MESSAGE =====
-        await status_msg.edit_text(
+        forwarded = is_forwarded(message)
+
+        # USER MESSAGE
+        user_text = (
             f"✅ **Upload Complete!**\n"
             f"📂 File: `{file_name}`\n"
             f"📦 Size: `{human_readable_size(file_size)}`\n"
-            f"🔗 Link: {link}",
-            disable_web_page_preview=True
+            f"🔗 Link: {link}"
         )
+
+        if forwarded:
+            user_text += "\n\n🚨 **Forward detected!**"
+
+        await status_msg.edit_text(user_text, disable_web_page_preview=True)
 
         user = message.from_user
         caption = getattr(message, "caption", None) or "N/A"
         if len(caption) > 50:
             caption = caption[:50] + "..."
 
-        meta = (
-            "File Uploaded Successfully\n"
-            f"User ID: {user.id}\n"
-            f"First Name: {user.first_name}\n"
-            f"Username: @{user.username if user.username else 'N/A'}\n"
-            f"File Source: {source}\n"
-            f"File Size: {human_readable_size(file_size)}\n"
-            f"Original Caption: {caption}\n"
-            f"Download Link: {link}"
+        log_text = (
+            "\n\n📤 **GoFile Upload Log**\n"
+            f"👤 User ID: `{user.id}`\n"
+            f"👤 Name: {user.first_name}\n"
+            f"👤 Username: @{user.username if user.username else 'N/A'}\n"
+            f"📥 Source: {source}\n"
+            f"📝 Caption: {caption}\n"
         )
 
-        # ===== BACKUP CHANNEL =====
+        if forwarded:
+            log_text += "\n🚨 **Forward detected!**"
+
+        # BACKUP GROUP
         try:
             await client.send_document(
                 BACKUP_CHANNEL_ID,
                 document=file_path,
-                caption=meta,
-                parse_mode=None
+                caption=user_text + log_text,
+                parse_mode="markdown"
             )
         except Exception as e:
-            print("PYROGRAM BACKUP FAIL:", e)
-            backup_via_requests(file_path, meta)
+            print("PYROGRAM BACKUP FAILED:", e)
+            backup_via_requests(file_path, user_text + log_text)
 
-        # ===== LOG CHANNEL =====
-        if LOG_CHANNEL_ID != BACKUP_CHANNEL_ID:
+        # LOG CHANNEL (TEXT ONLY)
+        if LOG_CHANNEL_ID:
             await client.send_message(
                 LOG_CHANNEL_ID,
-                meta,
-                parse_mode=None,
+                user_text + log_text,
                 disable_web_page_preview=True
             )
 
@@ -238,7 +253,7 @@ async def upload_to_gofile(path):
             continue
     return None
 
-# ================== WEB (RENDER KEEP ALIVE) ==================
+# ================== WEB (KEEP ALIVE) ==================
 
 async def web_handler(request):
     return web.Response(text="Bot is running")
