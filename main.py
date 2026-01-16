@@ -33,7 +33,7 @@ FORCE_SUB_INVITE_LINK = os.environ.get("FORCE_SUB_INVITE_LINK", "https://t.me/TO
 
 # Limits
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB (Gofile limit)
-MAX_URL_UPLOAD_SIZE = 250 * 1024 * 1024 # 250 MB (Limit for URL uploads to save server RAM)
+MAX_URL_UPLOAD_SIZE = 500 * 1024 * 1024 # 250 MB (Limit for URL uploads to save server RAM)
 
 # Server Config
 PRIORITIZED_SERVERS = ["upload-na-phx", "upload-ap-sgp", "upload-ap-hkg", "upload-eu-ams"]
