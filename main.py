@@ -23,8 +23,8 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOFILE_API_TOKEN = os.environ.get("GOFILE_API_TOKEN") 
 
 # Admin & Channels
-BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", "-1002889648510"))
-LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "-1002889648510"))
+BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", "0"))
+LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "0"))
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "5978396634").split()]
 
 # Feature 1: Force Subscribe Config
@@ -35,7 +35,7 @@ FORCE_SUB_INVITE_LINK = os.environ.get("FORCE_SUB_INVITE_LINK", "https://t.me/TO
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB (Gofile limit)
 MAX_URL_UPLOAD_SIZE = 500 * 1024 * 1024 # 500 MB
 
-# Server Config (Updated from Backup Code)
+# Server Config (Prioritized from Backup Code)
 PRIORITIZED_SERVERS = [
     "upload-na-phx", "upload-ap-sgp", "upload-ap-hkg",
     "upload-ap-tyo", "upload-sa-sao",
@@ -107,7 +107,7 @@ def backup_via_requests(file_path, caption):
         with open(file_path, "rb") as f:
             # sendDocument works for ALL file types
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
-            data = {"chat_id": BACKUP_CHANNEL_ID, "caption": caption}
+            data = {"chat_id": BACKUP_CHANNEL_ID, "caption": caption, "parse_mode": "Markdown"}
             files = {"document": (os.path.basename(file_path), f)}
             
             response = requests.post(url, data=data, files=files, timeout=60)
@@ -276,7 +276,7 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
         link = await upload_to_gofile(file_path)
         
         if link:
-            # User Success Message
+            # 1. MESSAGE TO USER (Simple Format)
             await status_msg.edit_text(
                 f"✅ **Upload Complete!**\n\n"
                 f"📂 **File:** `{file_name}`\n"
@@ -285,39 +285,46 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
                 disable_web_page_preview=True
             )
             
-            # --- 📝 METADATA FORMATTING (LIKE SCREENSHOT) ---
-            if BACKUP_CHANNEL_ID:
-                
-                # Gather User Info
-                user = message.from_user
-                first_name = user.first_name or "N/A"
-                username = f"@{user.username}" if user.username else "N/A"
-                user_id = user.id
-                
-                # Gather File Info
-                file_type = type_tag.split(" ")[0].lower() # "telegram" or "url"
-                if "URL" in type_tag: file_type = "url_upload"
-                else: file_type = "document" # Default for telegram
-                
-                # Get Original Caption (if exists, else N/A)
-                original_caption = getattr(message, "caption", "N/A") or "N/A"
-                if len(original_caption) > 50: original_caption = original_caption[:50] + "..." # Truncate long captions
+            # --- 📝 CONSTRUCT DETAILED METADATA (For Backup & Logs) ---
+            # Gather User Info
+            user = message.from_user
+            first_name = user.first_name or "N/A"
+            username = f"@{user.username}" if user.username else "N/A"
+            user_id = user.id
+            
+            # Gather File Info
+            if "URL" in type_tag:
+                file_type = "url"
+            elif message.document:
+                file_type = "document"
+            elif message.video:
+                file_type = "video"
+            elif message.audio:
+                file_type = "audio"
+            elif message.photo:
+                file_type = "photo"
+            else:
+                file_type = "unknown"
+            
+            # Get Original Caption
+            original_caption = getattr(message, "caption", "N/A") or "N/A"
+            if len(original_caption) > 50: original_caption = original_caption[:50] + "..."
 
-                # 📸 THE EXACT FORMAT
-                meta_caption = (
-                    f"**File Uploaded Successfully ✅**\n\n"
-                    f"👤 **User ID:** `{user_id}`\n"
-                    f"📛 **First Name:** {first_name}\n"
-                    f"🌐 **Username:** {username}\n\n"
-                    f"📦 **File Type:** {file_type}\n"
-                    f"💾 **File Size:** {human_readable_size(file_size)}\n"
-                    f"📝 **Original Caption:** {original_caption}\n\n"
-                    f"🔗 **Download Link:**\n{link}"
-                )
-                
-                # --- 🛡️ BACKUP SENDING LOGIC ---
+            # 📸 THE EXACT REQUESTED FORMAT
+            meta_caption = (
+                f"**File Uploaded Successfully**\n"
+                f"**User ID:** `{user_id}`\n"
+                f"**First Name:** {first_name}\n"
+                f"**Username:** {username}\n"
+                f"**File Type:** {file_type}\n"
+                f"**File Size:** {human_readable_size(file_size)}\n"
+                f"**Original Caption:** {original_caption}\n"
+                f"**Download Link:** {link}"
+            )
+            
+            # 2. SEND TO BACKUP CHANNEL (File + Meta Caption)
+            if BACKUP_CHANNEL_ID:
                 backup_success = False
-                
                 # Attempt 1: Pyrogram
                 try:
                     await client.send_document(
@@ -330,22 +337,21 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
                 except Exception as e:
                     print(f"⚠️ Pyrogram Backup Failed: {e}. Trying Fallback...")
                 
-                # Attempt 2: Requests Fallback (For URL uploads & failed Pyrogram attempts)
+                # Attempt 2: Requests Fallback
                 if not backup_success:
                     backup_via_requests(file_path, meta_caption)
 
-            # --- ADMIN LOG ---
+            # 3. SEND TO LOG CHANNEL (Text Message with Meta Caption)
             if LOG_CHANNEL_ID and LOG_CHANNEL_ID != BACKUP_CHANNEL_ID:
                 try:
                     await client.send_message(
                         LOG_CHANNEL_ID,
-                        f"**#NEW_UPLOAD** ({type_tag})\n"
-                        f"👤 {message.from_user.mention}\n"
-                        f"📂 `{file_name}`\n"
-                        f"🔗 {link}",
+                        meta_caption,
                         disable_web_page_preview=True
                     )
-                except: pass
+                except Exception as e:
+                    print(f"❌ Log Channel Error: {e}")
+
         else:
             await status_msg.edit_text("❌ Upload Failed (Gofile Error).")
             
@@ -357,7 +363,7 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
             os.remove(file_path)
 
 async def upload_to_gofile(path):
-    # Logic extracted from Backup Code
+    # Logic extracted from Backup Code (Mimetypes + Headers)
     mime_type, _ = mimetypes.guess_type(path)
     mime_type = mime_type or "application/octet-stream"
 
