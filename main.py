@@ -25,7 +25,7 @@ GOFILE_API_TOKEN = os.environ.get("GOFILE_API_TOKEN")
 # Note: BACKUP_CHANNEL_ID is for file archives. LOG_CHANNEL_ID is for admin logs.
 BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", "0"))
 LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "0"))
-ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split()]
+ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "5978396634").split()]
 
 # Feature 1: Force Subscribe Config
 FORCE_SUB_CHANNEL_ID = int(os.environ.get("FORCE_SUB_CHANNEL_ID", "-1002642665601"))
