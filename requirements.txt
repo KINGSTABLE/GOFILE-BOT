@@ -1,12 +1,10 @@
 requests
 termcolor
-telegram
 python-telegram-bot
 pyrogram
-yt-dlp
-ffmpeg
 TgCrypto
 Pillow
 aiogram
 aiohttp
+opencv-python-headless
 flask
