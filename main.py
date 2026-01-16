@@ -145,7 +145,7 @@ async def start(client, message):
         "🔹 **Upload:** Send any file (Max 500MB)\n"
         "🔹 **URL Upload:** `/upload http://link.com/file.mp4`\n"
         "🔹 **Rename:** `/rename newname.mp4` (Set name before sending file)\n\n"
-        "🚀 _Powered by Render_"
+        "🚀 Powered by @TOOLS_BOTS_KING"
     )
 
 # --- Feature 17: Stats ---
