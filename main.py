@@ -5,6 +5,7 @@ import time
 import json
 import shutil
 import requests
+import mimetypes
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import UserNotParticipant, FloodWait, UserIsBlocked, InputUserDeactivated
@@ -22,8 +23,8 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOFILE_API_TOKEN = os.environ.get("GOFILE_API_TOKEN") 
 
 # Admin & Channels
-BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", "0"))
-LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "0"))
+BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", "-1002889648510"))
+LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "-1002889648510"))
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "5978396634").split()]
 
 # Feature 1: Force Subscribe Config
@@ -34,8 +35,11 @@ FORCE_SUB_INVITE_LINK = os.environ.get("FORCE_SUB_INVITE_LINK", "https://t.me/TO
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB (Gofile limit)
 MAX_URL_UPLOAD_SIZE = 500 * 1024 * 1024 # 500 MB
 
-# Server Config
-PRIORITIZED_SERVERS = ["upload-na-phx", "upload-ap-sgp", "upload-ap-hkg", "upload-eu-ams"]
+# Server Config (Updated from Backup Code)
+PRIORITIZED_SERVERS = [
+    "upload-na-phx", "upload-ap-sgp", "upload-ap-hkg",
+    "upload-ap-tyo", "upload-sa-sao",
+]
 HEADERS = {"Authorization": f"Bearer {GOFILE_API_TOKEN}"}
 DB_FILE = "users_db.json"
 
@@ -353,19 +357,23 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
             os.remove(file_path)
 
 async def upload_to_gofile(path):
+    # Logic extracted from Backup Code
+    mime_type, _ = mimetypes.guess_type(path)
+    mime_type = mime_type or "application/octet-stream"
+
     for server in PRIORITIZED_SERVERS:
         try:
-            url = f"https://{server}.gofile.io/uploadfile"
             async with aiohttp.ClientSession() as session:
-                with open(path, "rb") as f:
-                    data = aiohttp.FormData()
-                    data.add_field('file', f, filename=os.path.basename(path))
-                    data.add_field('token', GOFILE_API_TOKEN)
-                    async with session.post(url, data=data) as response:
-                        if response.status == 200:
-                            res = await response.json()
-                            if res['status'] == 'ok': return res['data']['downloadPage']
-        except: continue
+                form_data = aiohttp.FormData()
+                form_data.add_field("file", open(path, "rb"), filename=os.path.basename(path), content_type=mime_type)
+                
+                async with session.post(f"https://{server}.gofile.io/uploadfile", headers=HEADERS, data=form_data) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+                    if result.get("status") == "ok":
+                        return result["data"]["downloadPage"]
+        except Exception:
+            continue
     return None
 
 # ==============================================================================
