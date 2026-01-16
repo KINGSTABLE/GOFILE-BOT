@@ -304,7 +304,7 @@ async def process_url_file(client, url, message, status_msg):
                 # Size Check
                 total_size = int(resp.headers.get('Content-Length', 0))
                 if total_size > MAX_URL_UPLOAD_SIZE:
-                    await status_msg.edit_text(f"❌ File too large for URL Upload.\nLimit: 250MB")
+                    await status_msg.edit_text(f"❌ File too large for URL Upload.\nLimit: 500MB")
                     return
 
                 with open(file_path, 'wb') as f:
