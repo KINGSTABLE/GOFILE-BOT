@@ -4,6 +4,7 @@ import asyncio
 import time
 import json
 import shutil
+import requests  # <--- NEW: Required for the fallback logic
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import UserNotParticipant, FloodWait, UserIsBlocked, InputUserDeactivated
@@ -21,7 +22,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOFILE_API_TOKEN = os.environ.get("GOFILE_API_TOKEN") 
 
 # Admin & Channels
-# 🚨 IMPORTANT: You must set BACKUP_CHANNEL_ID (e.g. -100xxxx) in Render!
 BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", "0"))
 LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "0"))
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "5978396634").split()]
@@ -45,7 +45,7 @@ app = Client("ultimate_gofile_bot", api_id=API_ID, api_hash=API_HASH, bot_token=
 # Global State
 download_queue = Queue()
 processing_lock = Lock()
-user_rename_preferences = {} # Stores custom filenames: {user_id: "filename.ext"}
+user_rename_preferences = {} 
 maintenance_mode = False
 
 # Ensure Directories
@@ -93,23 +93,42 @@ def human_readable_size(size):
         size /= 1024.0
     return f"{size:.2f} PB"
 
+# --- 🚀 NEW: ROBUST BACKUP FALLBACK (From Music Bot) ---
+def backup_via_requests(file_path, caption):
+    """
+    If Pyrogram fails, this uses standard HTTP requests to force the file 
+    into the channel. Adapted from your Music Bot.
+    """
+    try:
+        with open(file_path, "rb") as f:
+            # We use sendDocument so it works for ALL file types (Video, Audio, EXE, ZIP)
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+            data = {"chat_id": BACKUP_CHANNEL_ID, "caption": caption}
+            files = {"document": (os.path.basename(file_path), f)}
+            
+            response = requests.post(url, data=data, files=files, timeout=60)
+            
+            if response.status_code == 200:
+                print(f"✅ Backup successful via requests fallback.")
+                return True
+            else:
+                print(f"❌ Requests fallback failed: {response.text}")
+                return False
+    except Exception as e:
+        print(f"❌ Backup Error (Requests): {e}")
+        return False
+
 # ==============================================================================
 # 🔐 SECURITY CHECKS
 # ==============================================================================
 
 async def check_permissions(client, message):
     user_id = message.from_user.id
-    
-    # 1. Maintenance Check
     if maintenance_mode and user_id not in ADMIN_IDS:
         await message.reply_text("🚧 **Bot is in Maintenance Mode.**\nPlease try again later.")
         return False
-
-    # 2. Ban Check
     if is_banned(user_id):
-        return False # Silently ignore banned users
-
-    # 3. Force Subscribe Check
+        return False 
     if FORCE_SUB_CHANNEL_ID:
         try:
             user = await client.get_chat_member(FORCE_SUB_CHANNEL_ID, user_id)
@@ -119,15 +138,10 @@ async def check_permissions(client, message):
             buttons = [[InlineKeyboardButton("📢 Join Update Channel", url=FORCE_SUB_INVITE_LINK)]]
             if "start" in getattr(message, "text", ""):
                  buttons.append([InlineKeyboardButton("🔄 Try Again", url=f"https://t.me/{app.me.username}?start=start")])
-            
-            await message.reply_text(
-                "🛑 **Access Denied!**\n\nYou must join our channel to use this bot.",
-                reply_markup=InlineKeyboardMarkup(buttons)
-            )
+            await message.reply_text("🛑 **Access Denied!**\n\nYou must join our channel.", reply_markup=InlineKeyboardMarkup(buttons))
             return False
         except Exception:
             pass 
-
     return True
 
 # ==============================================================================
@@ -140,116 +154,37 @@ async def start(client, message):
     add_user(message.from_user.id)
     await message.reply_text(
         f"👋 **Hello {message.from_user.first_name}!**\n\n"
-        "I am the **Ultimate Gofile Uploader**.\n\n"
-        "🚀 **What I do:**\n"
-        "• Upload Telegram files to Gofile.io (Max 500MB)\n"
-        "• Upload from Direct URLs (Max 500MB)\n"
-        "• Rename files before uploading\n"
-        "• **Auto-Backup to Channel**\n\n"
-        "👇 **Click /help to see all commands!**"
+        "I am the **Ultimate Gofile Uploader**.\n"
+        "🚀 **I will upload your files to Gofile and Backup them to your channel!**"
     )
 
 @app.on_message(filters.command("help"))
 async def help_command(client, message):
     if not await check_permissions(client, message): return
-    
-    # User Commands
-    help_text = (
-        "📚 **User Commands:**\n\n"
-        "🔹 `/start` - Wake up the bot\n"
-        "🔹 `/upload <url>` - Upload a file from a direct link\n"
-        "🔹 `/rename <name.ext>` - Set a custom name for your next file\n"
-        "🔹 `/help` - Show this menu\n\n"
-        "📂 **How to Upload:**\n"
-        "Just send me any **Photo, Video, Audio, or Document**!"
-    )
+    await message.reply_text("🔹 `/upload <url>`\n🔹 `/rename <name>`\n🔹 `/start`")
 
-    # Admin Commands (Only visible to Admins)
-    if message.from_user.id in ADMIN_IDS:
-        help_text += (
-            "\n\n👮‍♂️ **Admin Commands:**\n"
-            "🔸 `/stats` - View bot disk usage & user count\n"
-            "🔸 `/broadcast` (reply to msg) - Send message to all users\n"
-            "🔸 `/ban <user_id>` - Ban a user permanently\n"
-            "🔸 `/unban <user_id>` - Unban a user\n"
-            "🔸 `/maintenance` - Toggle maintenance mode (On/Off)"
-        )
-    
-    await message.reply_text(help_text)
-
-# --- Feature 17: Stats ---
 @app.on_message(filters.command("stats") & filters.user(ADMIN_IDS))
 async def stats(client, message):
     db = get_db()
     total, used, free = shutil.disk_usage(".")
-    await message.reply_text(
-        f"📊 **System Statistics**\n\n"
-        f"👥 **Total Users:** {len(db['users'])}\n"
-        f"🚫 **Banned Users:** {len(db['banned'])}\n"
-        f"💾 **Disk Free:** {human_readable_size(free)}\n"
-        f"💿 **Disk Used:** {human_readable_size(used)}"
-    )
+    await message.reply_text(f"👥 Users: {len(db['users'])}\n💾 Free: {human_readable_size(free)}")
 
-# --- Feature 11: Rename ---
 @app.on_message(filters.command("rename"))
 async def set_rename(client, message):
     if not await check_permissions(client, message): return
     try:
         new_name = message.text.split(maxsplit=1)[1]
         user_rename_preferences[message.from_user.id] = new_name
-        await message.reply_text(f"✍️ **Rename Set:** `{new_name}`\n\nNow send me the file/video!")
+        await message.reply_text(f"✍️ **Rename Set:** `{new_name}`")
     except IndexError:
         await message.reply_text("❌ Usage: `/rename NewName.mp4`")
 
-# --- Feature 4: Maintenance ---
 @app.on_message(filters.command("maintenance") & filters.user(ADMIN_IDS))
 async def toggle_maintenance(client, message):
     global maintenance_mode
     maintenance_mode = not maintenance_mode
-    status = "ON 🔴" if maintenance_mode else "OFF 🟢"
-    await message.reply_text(f"🚧 **Maintenance Mode is now {status}**")
+    await message.reply_text(f"🚧 **Maintenance:** {'ON' if maintenance_mode else 'OFF'}")
 
-# --- Feature 3: Ban/Unban ---
-@app.on_message(filters.command("ban") & filters.user(ADMIN_IDS))
-async def ban_command(client, message):
-    try:
-        user_id = int(message.text.split()[1])
-        ban_user_db(user_id)
-        await message.reply_text(f"🚫 User `{user_id}` has been BANNED.")
-    except: await message.reply_text("❌ Usage: `/ban 12345678`")
-
-@app.on_message(filters.command("unban") & filters.user(ADMIN_IDS))
-async def unban_command(client, message):
-    try:
-        user_id = int(message.text.split()[1])
-        unban_user_db(user_id)
-        await message.reply_text(f"✅ User `{user_id}` UNBANNED.")
-    except: await message.reply_text("❌ Usage: `/unban 12345678`")
-
-# --- Feature 2: Broadcast ---
-@app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS))
-async def broadcast(client, message):
-    if not message.reply_to_message:
-        await message.reply_text("❌ Reply to a message to broadcast it.")
-        return
-    
-    msg = await message.reply_text("📢 **Starting Broadcast...**")
-    users = get_db()["users"]
-    sent, failed = 0, 0
-    
-    for user_id in users:
-        try:
-            await message.reply_to_message.copy(chat_id=user_id)
-            sent += 1
-            await asyncio.sleep(0.1) # Prevent floodwait
-        except (UserIsBlocked, InputUserDeactivated):
-            failed += 1
-        except Exception:
-            failed += 1
-            
-    await msg.edit_text(f"✅ **Broadcast Complete**\n\nSent: {sent}\nFailed: {failed}")
-
-# --- Feature 20: URL Leech ---
 @app.on_message(filters.command("upload"))
 async def url_upload(client, message):
     if not await check_permissions(client, message): return
@@ -258,12 +193,9 @@ async def url_upload(client, message):
     except IndexError:
         await message.reply_text("❌ Usage: `/upload http://example.com/video.mp4`")
         return
-
-    # Check queue limit
     if download_queue.qsize() > 5:
-        await message.reply_text("⚠️ Queue is full. Please wait.")
+        await message.reply_text("⚠️ Queue is full.")
         return
-
     msg = await message.reply_text("🔗 **Processing URL...**")
     await download_queue.put(("url", url, message, msg))
     asyncio.create_task(process_queue(client))
@@ -277,18 +209,15 @@ async def handle_file(client, message):
     if not await check_permissions(client, message): return
     add_user(message.from_user.id)
     
-    # Identify media
     media = message.document or message.video or message.audio or message.photo
-    if message.photo: media.file_name = f"photo_{message.id}.jpg" # Photos have no name
+    if message.photo: media.file_name = f"photo_{message.id}.jpg" 
     
     if media.file_size > MAX_FILE_SIZE:
-        await message.reply_text(f"❌ **File too large!**\nLimit: 500MB\nYour File: {human_readable_size(media.file_size)}")
+        await message.reply_text(f"❌ **File too large!** Limit: 500MB")
         return
 
-    # Check for rename
     custom_name = user_rename_preferences.pop(message.from_user.id, None)
-    
-    msg = await message.reply_text(f"✅ **Added to Queue**\nPosition: {download_queue.qsize() + 1}")
+    msg = await message.reply_text(f"✅ **Added to Queue** ({download_queue.qsize() + 1})")
     await download_queue.put(("file", media, message, msg, custom_name))
     asyncio.create_task(process_queue(client))
 
@@ -301,43 +230,32 @@ async def process_queue(client):
             elif task[0] == "url":
                 await process_url_file(client, *task[1:])
 
-# --- Telegram File Processor ---
 async def process_tg_file(client, media, message, status_msg, custom_name):
     try:
         file_name = custom_name or getattr(media, 'file_name', f"file_{message.id}")
         file_path = os.path.join("downloads", file_name)
-        
-        await status_msg.edit_text("📥 **Downloading from Telegram...**")
-        
+        await status_msg.edit_text("📥 **Downloading...**")
         await client.download_media(message, file_name=file_path)
-        
         await upload_handler(client, message, status_msg, file_path, media.file_size, file_name, "Telegram File")
     except Exception as e:
         await status_msg.edit_text(f"❌ Error: {e}")
 
-# --- URL File Processor ---
 async def process_url_file(client, url, message, status_msg):
     try:
         file_name = url.split("/")[-1] or f"leech_{int(time.time())}.dat"
         file_path = os.path.join("downloads", file_name)
-        
         await status_msg.edit_text("📥 **Downloading from URL...**")
-        
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
-                    await status_msg.edit_text("❌ Invalid URL or Server Error.")
+                    await status_msg.edit_text("❌ Server Error.")
                     return
-                
-                # Size Check
-                total_size = int(resp.headers.get('Content-Length', 0))
-                if total_size > MAX_URL_UPLOAD_SIZE:
-                    await status_msg.edit_text(f"❌ File too large for URL Upload.\nLimit: 500MB")
+                if int(resp.headers.get('Content-Length', 0)) > MAX_URL_UPLOAD_SIZE:
+                    await status_msg.edit_text(f"❌ File too large.")
                     return
-
                 with open(file_path, 'wb') as f:
                     while True:
-                        chunk = await resp.content.read(1024*1024) # 1MB chunks
+                        chunk = await resp.content.read(1024*1024)
                         if not chunk: break
                         f.write(chunk)
         
@@ -346,7 +264,7 @@ async def process_url_file(client, url, message, status_msg):
     except Exception as e:
         await status_msg.edit_text(f"❌ URL Error: {e}")
 
-# --- Common Upload Logic ---
+# --- 🚀 UPDATED UPLOAD LOGIC WITH FALLBACK ---
 async def upload_handler(client, message, status_msg, file_path, file_size, file_name, type_tag):
     try:
         await status_msg.edit_text("⬆️ **Uploading to Gofile...**")
@@ -363,52 +281,52 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
                 disable_web_page_preview=True
             )
             
-            # --- STRONG FORWARD LOGIC (BACKUP CHANNEL) ---
+            # --- 🛡️ BACKUP LOGIC (TRY PYROGRAM -> FALLBACK TO REQUESTS) ---
             if BACKUP_CHANNEL_ID:
+                meta_caption = (
+                    f"**#BACKUP_ARCHIVE**\n"
+                    f"📂 **File:** `{file_name}`\n"
+                    f"📦 **Size:** `{human_readable_size(file_size)}`\n"
+                    f"👤 **User:** {message.from_user.mention}\n"
+                    f"🔗 **Gofile:** {link}"
+                )
+                
+                # Attempt 1: Pyrogram (Fast, Clean)
+                backup_success = False
                 try:
-                    meta_caption = (
-                        f"**#BACKUP_ARCHIVE**\n"
-                        f"📂 **File:** `{file_name}`\n"
-                        f"📦 **Size:** `{human_readable_size(file_size)}`\n"
-                        f"👤 **User:** {message.from_user.mention}\n"
-                        f"🔗 **Gofile:** {link}"
-                    )
-
-                    # ⚡ CHANGED HERE: We now FORCE UPLOAD the local file 
-                    # instead of copying the message. This ensures it works 
-                    # even if the user message is restricted.
                     await client.send_document(
                         chat_id=BACKUP_CHANNEL_ID,
                         document=file_path,
                         caption=meta_caption
                     )
-                    
-                    print(f"✅ Successfully backed up {file_name} to channel.")
-
+                    backup_success = True
+                    print(f"✅ Backup sent via Pyrogram: {file_name}")
                 except Exception as e:
-                    # ⚠️ Logs the specific error to your Render Console
-                    print(f"❌ Backup Channel Error: {e}")
-                    # Optional: Notify Admin if Backup fails
-                    if LOG_CHANNEL_ID:
-                        await client.send_message(LOG_CHANNEL_ID, f"⚠️ **Backup Failed:** {e}")
+                    print(f"⚠️ Pyrogram Backup Failed: {e}. Trying Fallback...")
+                
+                # Attempt 2: Requests Fallback (If Pyrogram failed)
+                if not backup_success:
+                    backup_via_requests(file_path, meta_caption)
 
-            # --- ADMIN LOG CHANNEL ---
+            # --- ADMIN LOG ---
             if LOG_CHANNEL_ID and LOG_CHANNEL_ID != BACKUP_CHANNEL_ID:
-                await client.send_message(
-                    LOG_CHANNEL_ID,
-                    f"**#NEW_UPLOAD** ({type_tag})\n"
-                    f"👤 {message.from_user.mention} (`{message.from_user.id}`)\n"
-                    f"📂 `{file_name}`\n"
-                    f"🔗 {link}",
-                    disable_web_page_preview=True
-                )
+                try:
+                    await client.send_message(
+                        LOG_CHANNEL_ID,
+                        f"**#NEW_UPLOAD** ({type_tag})\n"
+                        f"👤 {message.from_user.mention}\n"
+                        f"📂 `{file_name}`\n"
+                        f"🔗 {link}",
+                        disable_web_page_preview=True
+                    )
+                except: pass
         else:
             await status_msg.edit_text("❌ Upload Failed (Gofile Error).")
             
     except Exception as e:
         print(f"Upload Error: {e}")
     finally:
-        # 🧹 CLEANUP: Delete the file from server
+        # 🧹 CLEANUP
         if os.path.exists(file_path): 
             os.remove(file_path)
 
@@ -429,7 +347,7 @@ async def upload_to_gofile(path):
     return None
 
 # ==============================================================================
-# 🌐 WEB SERVER (Keep Alive)
+# 🌐 WEB SERVER
 # ==============================================================================
 async def web_handler(request): return web.Response(text="Ultimate Bot Running")
 async def start_web():
