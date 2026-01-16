@@ -21,7 +21,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOFILE_API_TOKEN = os.environ.get("GOFILE_API_TOKEN") 
 
 # Admin & Channels
-# 🚨 IMPORTANT: You must set BACKUP_CHANNEL_ID to your channel ID (e.g., -100xxxxxxx)
+# 🚨 IMPORTANT: You must set BACKUP_CHANNEL_ID (e.g. -100xxxx) in Render!
 BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", "0"))
 LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "0"))
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "5978396634").split()]
@@ -145,7 +145,7 @@ async def start(client, message):
         "• Upload Telegram files to Gofile.io (Max 500MB)\n"
         "• Upload from Direct URLs (Max 500MB)\n"
         "• Rename files before uploading\n"
-        "• **Auto-Forward to Backup Channel**\n\n"
+        "• **Auto-Backup to Channel**\n\n"
         "👇 **Click /help to see all commands!**"
     )
 
@@ -374,21 +374,23 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
                         f"🔗 **Gofile:** {link}"
                     )
 
-                    if type_tag == "Telegram File":
-                        # For Telegram files, we copy the original message but OVERRIDE caption to include metadata
-                        await message.copy(
-                            chat_id=BACKUP_CHANNEL_ID,
-                            caption=meta_caption
-                        )
-                    else:
-                        # For URL files, we must upload the LOCAL file to the channel
-                        await client.send_document(
-                            chat_id=BACKUP_CHANNEL_ID,
-                            document=file_path,
-                            caption=meta_caption
-                        )
+                    # ⚡ CHANGED HERE: We now FORCE UPLOAD the local file 
+                    # instead of copying the message. This ensures it works 
+                    # even if the user message is restricted.
+                    await client.send_document(
+                        chat_id=BACKUP_CHANNEL_ID,
+                        document=file_path,
+                        caption=meta_caption
+                    )
+                    
+                    print(f"✅ Successfully backed up {file_name} to channel.")
+
                 except Exception as e:
-                    print(f"Backup Channel Error: {e}")
+                    # ⚠️ Logs the specific error to your Render Console
+                    print(f"❌ Backup Channel Error: {e}")
+                    # Optional: Notify Admin if Backup fails
+                    if LOG_CHANNEL_ID:
+                        await client.send_message(LOG_CHANNEL_ID, f"⚠️ **Backup Failed:** {e}")
 
             # --- ADMIN LOG CHANNEL ---
             if LOG_CHANNEL_ID and LOG_CHANNEL_ID != BACKUP_CHANNEL_ID:
