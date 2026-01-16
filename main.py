@@ -5,6 +5,7 @@ import time
 import json
 import math
 import shutil
+import io
 import logging
 from datetime import datetime, timedelta
 from pyrogram import Client, filters, idle
@@ -13,7 +14,7 @@ from pyrogram.errors import UserNotParticipant, FloodWait, UserIsBlocked, InputU
 from asyncio import Queue, Lock
 from aiohttp import web
 
-# Optional: OpenCV for screenshots (Graceful fallback if not installed)
+# Optional: OpenCV for screenshots (Graceful fallback)
 try:
     import cv2
     HAS_OPENCV = True
@@ -35,7 +36,7 @@ BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", "0"))
 LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "0"))
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "5978396634").split()]
 
-# Feature 1: Force Subscribe Config
+# Feature: Force Subscribe
 FORCE_SUB_CHANNEL_ID = int(os.environ.get("FORCE_SUB_CHANNEL_ID", "-1002642665601"))
 FORCE_SUB_INVITE_LINK = os.environ.get("FORCE_SUB_INVITE_LINK", "https://t.me/TOOLS_BOTS_KING")
 
@@ -58,10 +59,7 @@ processing_lock = Lock()
 user_rename_preferences = {} 
 maintenance_mode = False
 
-# ==============================================================================
-# 📊 ANALYTICS & DASHBOARD STATE
-# ==============================================================================
-# Lifetime stats (persisted in DB mostly, but tracked live here)
+# Analytics State
 global_stats = {
     "total_uploads": 0,
     "total_data_moved": 0,
@@ -69,7 +67,6 @@ global_stats = {
     "active_session_users": set()
 }
 
-# Daily stats (Reset every 24h)
 daily_stats = {
     "date": datetime.utcnow().date(),
     "uploads": 0,
@@ -84,11 +81,14 @@ if not os.path.exists(DB_FILE):
     with open(DB_FILE, "w") as f: json.dump({"users": [], "banned": []}, f)
 
 # ==============================================================================
-# 🛠️ HELPER FUNCTIONS & CLASSES
+# 🛠️ HELPER CLASSES & FUNCTIONS
 # ==============================================================================
 
-class ProgressReader:
-    """Custom wrapper to track Upload Progress for aiohttp"""
+class ProgressReader(io.IOBase):
+    """
+    Robust Wrapper to track Upload Progress for Telegram files.
+    Acts like a file object but triggers a callback on read.
+    """
     def __init__(self, filename, callback):
         self._file = open(filename, 'rb')
         self._total = os.path.getsize(filename)
@@ -149,7 +149,6 @@ def generate_thumbnail(video_path):
     try:
         cap = cv2.VideoCapture(video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        # Get frame from 10% into the video or middle
         cap.set(cv2.CAP_PROP_POS_FRAMES, min(total_frames // 2, 100)) 
         success, image = cap.read()
         if success:
@@ -157,12 +156,10 @@ def generate_thumbnail(video_path):
             cap.release()
             return thumb_path
         cap.release()
-    except Exception as e:
-        print(f"Thumb Error: {e}")
+    except Exception: pass
     return None
 
 def update_daily_analytics(file_type_tag):
-    # Reset check
     now = datetime.utcnow()
     if daily_stats["date"] != now.date():
         daily_stats["date"] = now.date()
@@ -173,13 +170,11 @@ def update_daily_analytics(file_type_tag):
 
     daily_stats["uploads"] += 1
     daily_stats["file_types"][file_type_tag] = daily_stats["file_types"].get(file_type_tag, 0) + 1
-    
     hour = now.strftime("%H")
     daily_stats["peak_hours"][hour] = daily_stats["peak_hours"].get(hour, 0) + 1
 
 async def progress_bar(current, total, status_msg, start_time, mode="Downloading"):
     now = time.time()
-    # Update every 3 seconds to avoid FloodWait
     if not hasattr(progress_bar, "last_update"): progress_bar.last_update = 0
     if now - progress_bar.last_update < 3 and current != total: return
 
@@ -188,8 +183,8 @@ async def progress_bar(current, total, status_msg, start_time, mode="Downloading
     speed = current / (now - start_time) if now - start_time > 0 else 0
     eta = (total - current) / speed if speed > 0 else 0
     
-    filled_len = int(percentage // 10)
-    bar = '█' * filled_len + '▒' * (10 - filled_len)
+    filled = int(percentage // 10)
+    bar = '█' * filled + '▒' * (10 - filled)
     
     try:
         await status_msg.edit_text(
@@ -202,7 +197,7 @@ async def progress_bar(current, total, status_msg, start_time, mode="Downloading
     except Exception: pass
 
 # ==============================================================================
-# 🔐 SECURITY CHECKS
+# 🔐 SECURITY & PERMISSIONS
 # ==============================================================================
 
 async def check_permissions(client, message):
@@ -241,11 +236,12 @@ async def start(client, message):
     add_user(message.from_user.id)
     await message.reply_text(
         f"👋 **Hello {message.from_user.first_name}!**\n\n"
-        "I am the **Ultimate Gofile Uploader** with **UX Pro Features**.\n\n"
-        "📊 **Live Progress Bars**\n"
-        "📸 **Auto-Screenshots**\n"
-        "🚀 **Direct URL Uploads**\n\n"
-        "👇 **Click /help to see all commands!**"
+        "I am the **Ultimate Gofile Uploader**.\n\n"
+        "📊 **Features:**\n"
+        "• Live Upload Progress (Telegram Files)\n"
+        "• Direct URL Uploads\n"
+        "• Auto-Screenshots (Videos)\n\n"
+        "👇 **Click /help for more.**"
     )
 
 @app.on_message(filters.command("help"))
@@ -253,18 +249,17 @@ async def help_command(client, message):
     if not await check_permissions(client, message): return
     
     help_text = (
-        "📚 **User Commands:**\n\n"
-        "🔹 `/start` - Wake up the bot\n"
-        "🔹 `/upload <url>` - Upload from direct link\n"
-        "🔹 `/rename <name.ext>` - Set custom filename\n\n"
-        "📂 **Simply send any file to upload!**"
+        "📚 **User Commands:**\n"
+        "🔹 `/upload <url>` - Upload from link\n"
+        "🔹 `/rename <name>` - Set filename\n"
+        "🔹 Send any file/video to upload\n\n"
     )
 
     if message.from_user.id in ADMIN_IDS:
         help_text += (
-            "\n\n👮‍♂️ **Admin Commands:**\n"
-            "🔸 `/stats` - View Dashboard Link & Disk Info\n"
-            "🔸 `/broadcast` - Broadcast message\n"
+            "👮‍♂️ **Admin Commands:**\n"
+            "🔸 `/stats` - Dashboard & Disk Info\n"
+            "🔸 `/broadcast` - Send message to all\n"
             "🔸 `/ban <id>` - Ban user\n"
             "🔸 `/unban <id>` - Unban user\n"
             "🔸 `/maintenance` - Toggle Maintenance"
@@ -275,17 +270,14 @@ async def help_command(client, message):
 async def stats(client, message):
     db = get_db()
     total, used, free = shutil.disk_usage(".")
-    
-    # Get the URL (assuming standard Render format or configured domain)
-    app_url = os.environ.get("RENDER_EXTERNAL_URL", "https://your-app-name.onrender.com")
+    app_url = os.environ.get("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
     
     await message.reply_text(
         f"📊 **System Statistics**\n\n"
-        f"👥 **Total Users (DB):** {len(db['users'])}\n"
-        f"⚡ **Active Session:** {len(global_stats['active_session_users'])}\n"
-        f"🚫 **Banned:** {len(db['banned'])}\n"
-        f"💾 **Disk Free:** {human_readable_size(free)}\n\n"
-        f"🔗 **Admin Dashboard:**\n{app_url}"
+        f"👥 **Users:** {len(db['users'])}\n"
+        f"⚡ **Active:** {len(global_stats['active_session_users'])}\n"
+        f"💾 **Free:** {human_readable_size(free)}\n\n"
+        f"🔗 **Dashboard:**\n{app_url}"
     )
 
 @app.on_message(filters.command("rename"))
@@ -350,7 +342,8 @@ async def url_upload(client, message):
         return
 
     msg = await message.reply_text("🔗 **Processing URL...**")
-    await download_queue.put(("url", url, message, msg, None)) # None = no custom name predefined
+    # Queue item: (type, data, message, msg, custom_name)
+    await download_queue.put(("url", url, message, msg, None))
     asyncio.create_task(process_queue(client))
 
 # ==============================================================================
@@ -379,14 +372,46 @@ async def process_queue(client):
     async with processing_lock:
         while not download_queue.empty():
             task = await download_queue.get()
-            # task = (type, media/url, message, msg, custom_name)
             if task[0] == "file":
-                await process_upload_task(client, task[1], task[2], task[3], task[4], "Telegram")
+                await process_tg_file(client, *task[1:])
             elif task[0] == "url":
-                await process_url_task(client, task[1], task[2], task[3])
+                await process_url_file(client, *task[1:])
 
-# --- URL Task Wrapper ---
-async def process_url_task(client, url, message, status_msg):
+# --- 1. Telegram File Processing (WITH PROGRESS BAR & SCREENSHOTS) ---
+async def process_tg_file(client, media, message, status_msg, custom_name):
+    try:
+        file_name = custom_name or getattr(media, 'file_name', f"file_{message.id}")
+        file_path = os.path.join("downloads", file_name)
+        is_video = bool(message.video)
+
+        start_time = time.time()
+        await client.download_media(
+            message, 
+            file_name=file_path,
+            progress=progress_bar,
+            progress_args=(status_msg, start_time, "📥 Downloading")
+        )
+        
+        # Screenshot Logic
+        thumb_path = None
+        if is_video and HAS_OPENCV:
+            await status_msg.edit_text("📸 **Generating Thumbnail...**")
+            thumb_path = generate_thumbnail(file_path)
+
+        # Upload with Progress Callback
+        await status_msg.edit_text("⬆️ **Connecting to Gofile...**")
+        start_up = time.time()
+        async def up_callback(curr, tot): 
+            await progress_bar(curr, tot, status_msg, start_up, "☁️ Uploading")
+            
+        await common_upload_handler(client, message, status_msg, file_path, media.file_size, file_name, "Telegram", thumb_path, up_callback)
+
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Error: {e}")
+        if os.path.exists(file_path): os.remove(file_path)
+
+# --- 2. URL File Processing (STABLE - NO UPLOAD PROGRESS) ---
+async def process_url_file(client, url, message, status_msg, custom_name):
     try:
         file_name = url.split("/")[-1] or f"leech_{int(time.time())}.dat"
         file_path = os.path.join("downloads", file_name)
@@ -402,7 +427,7 @@ async def process_url_task(client, url, message, status_msg):
                 
                 total_size = int(resp.headers.get('Content-Length', 0))
                 if total_size > MAX_URL_UPLOAD_SIZE:
-                    await status_msg.edit_text(f"❌ File too large for URL Upload.")
+                    await status_msg.edit_text(f"❌ File too large.")
                     return
 
                 with open(file_path, 'wb') as f:
@@ -412,72 +437,36 @@ async def process_url_task(client, url, message, status_msg):
                         if not chunk: break
                         f.write(chunk)
                         downloaded += len(chunk)
-                        # Minimal progress update for URL dl
+                        # Minimal download progress for URL
                         if time.time() - start_dl > 4:
                             start_dl = time.time()
                             try: await status_msg.edit_text(f"📥 **Downloading URL...**\n{human_readable_size(downloaded)}")
                             except: pass
         
         file_size = os.path.getsize(file_path)
-        # Pass to main upload handler
-        await process_upload_logic(client, message, status_msg, file_path, file_size, file_name, "URL Upload", is_video=False)
+        # Upload WITHOUT callback (Simpler method for stability)
+        await status_msg.edit_text("⬆️ **Uploading to Gofile...**\n_(Please wait, processing...)_")
+        await common_upload_handler(client, message, status_msg, file_path, file_size, file_name, "URL Upload", None, None)
 
     except Exception as e:
         await status_msg.edit_text(f"❌ URL Error: {e}")
-    finally:
-         if os.path.exists(file_path): os.remove(file_path) # Fallback cleanup
-
-# --- Telegram Task Wrapper ---
-async def process_upload_task(client, media, message, status_msg, custom_name, origin):
-    try:
-        file_name = custom_name or getattr(media, 'file_name', f"file_{message.id}")
-        file_path = os.path.join("downloads", file_name)
-        is_video = bool(message.video)
-
-        start_time = time.time()
-        await client.download_media(
-            message, 
-            file_name=file_path,
-            progress=progress_bar,
-            progress_args=(status_msg, start_time, "📥 Downloading")
-        )
-        
-        await process_upload_logic(client, message, status_msg, file_path, media.file_size, file_name, origin, is_video)
-
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Error: {e}")
-        # Clean up if download failed in middle
         if os.path.exists(file_path): os.remove(file_path)
 
-# --- Core Upload Logic (Shared) ---
-async def process_upload_logic(client, message, status_msg, file_path, file_size, file_name, origin, is_video):
-    thumb_path = None
+# --- Common Upload & Logging ---
+async def common_upload_handler(client, message, status_msg, file_path, file_size, file_name, origin, thumb_path, progress_cb):
     try:
-        # 1. Screenshot Generation
-        if is_video and HAS_OPENCV:
-            await status_msg.edit_text("📸 **Generating Thumbnail...**")
-            thumb_path = generate_thumbnail(file_path)
-
-        # 2. Upload with Progress
-        await status_msg.edit_text("⬆️ **Connecting to Gofile...**")
-        start_up = time.time()
-
-        # Define callback locally to capture scope
-        async def upload_callback(current, total):
-            await progress_bar(current, total, status_msg, start_up, "☁️ Uploading")
-
-        link = await upload_to_gofile(file_path, upload_callback)
+        link = await upload_to_gofile_hybrid(file_path, progress_cb)
 
         if link:
-            # 3. Analytics & Logging
-            ftype = "Video" if is_video else "File"
-            if file_name.lower().endswith(('.jpg', '.png', '.jpeg')): ftype = "Photo"
-            
+            # Analytics
+            ftype = "File"
+            if file_name.lower().endswith(('.mp4', '.mkv')): ftype = "Video"
+            elif file_name.lower().endswith(('.jpg', '.png')): ftype = "Photo"
             global_stats["total_uploads"] += 1
             global_stats["total_data_moved"] += file_size
             update_daily_analytics(ftype)
 
-            # 4. User Success Message
+            # Success Message
             await status_msg.edit_text(
                 f"✅ **Upload Complete!**\n\n"
                 f"📂 `{file_name}`\n"
@@ -486,27 +475,25 @@ async def process_upload_logic(client, message, status_msg, file_path, file_size
                 disable_web_page_preview=True
             )
 
-            # 5. Backup & Admin Log
+            # Log & Backup
             log_caption = (
                 f"**#NEW_UPLOAD** ({origin})\n"
-                f"👤 {message.from_user.mention} (`{message.from_user.id}`)\n"
+                f"👤 {message.from_user.mention}\n"
                 f"📂 `{file_name}`\n"
                 f"🔗 {link}"
             )
             
             if LOG_CHANNEL_ID:
-                try: await client.send_message(LOG_CHANNEL_ID, log_caption, disable_web_page_preview=True)
+                try: await client.send_message(LOG_CHANNEL_ID, log_caption)
                 except: pass
 
             if BACKUP_CHANNEL_ID:
                 try:
-                    # Send with thumb if available
                     if thumb_path:
                         await client.send_document(BACKUP_CHANNEL_ID, file_path, thumb=thumb_path, caption=log_caption)
                     else:
                         await client.send_document(BACKUP_CHANNEL_ID, file_path, caption=log_caption)
-                except Exception as e:
-                    print(f"Backup failed: {e}")
+                except: pass
 
         else:
             global_stats["failed_uploads"] += 1
@@ -514,27 +501,39 @@ async def process_upload_logic(client, message, status_msg, file_path, file_size
             await status_msg.edit_text("❌ Upload Failed (Gofile Rejected).")
 
     except Exception as e:
-        print(f"Logic Error: {e}")
         await status_msg.edit_text(f"❌ Process Error: {e}")
     finally:
         # 🧹 CLEANUP
         if os.path.exists(file_path): os.remove(file_path)
         if thumb_path and os.path.exists(thumb_path): os.remove(thumb_path)
 
-async def upload_to_gofile(path, progress_callback):
-    # Use ProgressReader wrapper
-    file_reader = ProgressReader(path, progress_callback)
+async def upload_to_gofile_hybrid(path, progress_callback=None):
     for server in PRIORITIZED_SERVERS:
         try:
             url = f"https://{server}.gofile.io/uploadfile"
             async with aiohttp.ClientSession() as session:
                 data = aiohttp.FormData()
-                data.add_field('file', file_reader, filename=os.path.basename(path))
+                
+                # Hybrid Logic: Use Wrapper if callback exists, else standard open
+                if progress_callback:
+                    file_obj = ProgressReader(path, progress_callback)
+                else:
+                    file_obj = open(path, "rb")
+                
+                data.add_field('file', file_obj, filename=os.path.basename(path))
                 data.add_field('token', GOFILE_API_TOKEN)
-                async with session.post(url, data=data) as response:
-                    if response.status == 200:
-                        res = await response.json()
-                        if res['status'] == 'ok': return res['data']['downloadPage']
+                
+                try:
+                    async with session.post(url, data=data) as response:
+                        if response.status == 200:
+                            res = await response.json()
+                            if res['status'] == 'ok': 
+                                file_obj.close()
+                                return res['data']['downloadPage']
+                except:
+                    file_obj.close()
+                    continue
+                file_obj.close()
         except: continue
     return None
 
@@ -545,47 +544,26 @@ async def upload_to_gofile(path, progress_callback):
 async def daily_report_scheduler():
     while True:
         try:
-            now = datetime.utcnow()
-            # Wait for next check (every 60s)
             await asyncio.sleep(60)
-            
-            # Condition: It is 00:00 UTC (or close to it) and we haven't reported yet?
-            # Simplified: Use daily_stats["date"] mismatch to trigger summary of "Yesterday"
-            # But simpler approach for this bot: Just report status every 24h from start?
-            # Better approach: Check if hour is 00 and minute is 00
+            now = datetime.utcnow()
             if now.hour == 0 and now.minute == 0:
                 if LOG_CHANNEL_ID:
-                    # Find top file type
                     top_type = max(daily_stats["file_types"], key=daily_stats["file_types"].get)
-                    success_rate = 100
                     total = daily_stats["uploads"] + daily_stats["failed"]
-                    if total > 0:
-                        success_rate = (daily_stats["uploads"] / total) * 100
+                    success_rate = (daily_stats["uploads"] / total * 100) if total > 0 else 0
                     
-                    # Find Peak Hour
-                    peak_h = "N/A"
-                    if daily_stats["peak_hours"]:
-                        peak_h = max(daily_stats["peak_hours"], key=daily_stats["peak_hours"].get)
-
                     report = (
                         f"📈 **Daily Report**\n\n"
-                        f"• **Total Uploads:** {daily_stats['uploads']}\n"
-                        f"• **Success Rate:** {success_rate:.1f}%\n"
-                        f"• **Peak Hour (UTC):** {peak_h}:00\n"
-                        f"• **Top File Type:** {top_type} ({daily_stats['file_types'][top_type]})\n\n"
-                        f"🤖 _Auto-Generated by Gofile Bot_"
+                        f"• Uploads: {daily_stats['uploads']}\n"
+                        f"• Success: {success_rate:.1f}%\n"
+                        f"• Top Type: {top_type}\n"
                     )
                     await app.send_message(LOG_CHANNEL_ID, report)
-                    
-                # Sleep a bit to avoid double sending
                 await asyncio.sleep(120) 
-                
-        except Exception as e:
-            print(f"Scheduler Error: {e}")
-            await asyncio.sleep(60)
+        except: await asyncio.sleep(60)
 
 # ==============================================================================
-# 🌐 ADMIN DASHBOARD (Web UI)
+# 🌐 ADMIN DASHBOARD
 # ==============================================================================
 
 async def dashboard_handler(request):
@@ -596,69 +574,24 @@ async def dashboard_handler(request):
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Gofile Bot Dashboard</title>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Bot Dashboard</title>
         <style>
-            body {{ background-color: #121212; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; padding: 20px; }}
-            .container {{ max-width: 800px; margin: 0 auto; }}
-            .card {{ background: #1e1e1e; padding: 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }}
-            h2 {{ color: #bb86fc; border-bottom: 1px solid #333; padding-bottom: 10px; }}
-            .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }}
-            .stat-box {{ background: #2c2c2c; padding: 15px; border-radius: 5px; text-align: center; }}
-            .stat-val {{ font-size: 24px; font-weight: bold; color: #03dac6; }}
-            .stat-label {{ font-size: 12px; color: #aaa; }}
+            body {{ background:#121212; color:#fff; font-family:sans-serif; padding:20px; }}
+            .card {{ background:#1e1e1e; padding:20px; margin:10px 0; border-radius:8px; }}
+            .stat {{ font-size:20px; color:#03dac6; }}
         </style>
     </head>
     <body>
-        <div class="container">
-            <h1>🤖 Bot Admin Panel</h1>
-            
-            <div class="card">
-                <h2>📈 Live Status</h2>
-                <div class="grid">
-                    <div class="stat-box">
-                        <div class="stat-val">{download_queue.qsize()}</div>
-                        <div class="stat-label">Queue Size</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-val">{len(global_stats['active_session_users'])}</div>
-                        <div class="stat-label">Active Users (Session)</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-val">{uptime}</div>
-                        <div class="stat-label">Uptime</div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="card">
-                <h2>💾 Performance</h2>
-                <div class="grid">
-                    <div class="stat-box">
-                        <div class="stat-val">{global_stats['total_uploads']}</div>
-                        <div class="stat-label">Total Uploads</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-val">{human_readable_size(global_stats['total_data_moved'])}</div>
-                        <div class="stat-label">Data Moved</div>
-                    </div>
-                     <div class="stat-box">
-                        <div class="stat-val">{daily_stats['failed']}</div>
-                        <div class="stat-label">Failed (Today)</div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="card">
-                <h2>📀 Server Disk</h2>
-                <p>Free: <b>{human_readable_size(free)}</b> / Used: <b>{human_readable_size(used)}</b></p>
-                <div style="background:#333; height:10px; border-radius:5px; overflow:hidden;">
-                    <div style="width:{(used/total)*100}%; background:#cf6679; height:100%;"></div>
-                </div>
-            </div>
-            
-            <p style="text-align:center; font-size:12px; color:#555;">Render Instance Running</p>
+        <h1>🤖 Bot Admin Panel</h1>
+        <div class="card">
+            <h3>📈 Live Status</h3>
+            <p>Queue: <span class="stat">{download_queue.qsize()}</span></p>
+            <p>Active Users: <span class="stat">{len(global_stats['active_session_users'])}</span></p>
+            <p>Uptime: <span class="stat">{uptime}</span></p>
+        </div>
+        <div class="card">
+            <h3>💾 Storage</h3>
+            <p>Free: {human_readable_size(free)} | Used: {human_readable_size(used)}</p>
         </div>
     </body>
     </html>
@@ -676,20 +609,14 @@ async def start_web():
     print(f"✅ Dashboard active on port {port}")
 
 # ==============================================================================
-# 🔥 MAIN ENTRY POINT
+# 🔥 MAIN
 # ==============================================================================
 
 async def main():
-    print("--- Ultimate Bot Starting ---")
+    print("--- Bot Starting ---")
     await app.start()
-    print("--- Telegram Client Connected ---")
-    
-    # Start Web Server
     await start_web()
-    
-    # Start Background Tasks (Daily Report)
     asyncio.create_task(daily_report_scheduler())
-    
     await idle()
     await app.stop()
 
