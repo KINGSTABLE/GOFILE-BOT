@@ -4,7 +4,7 @@ import asyncio
 import time
 import json
 import shutil
-import requests  # <--- NEW: Required for the fallback logic
+import requests
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import UserNotParticipant, FloodWait, UserIsBlocked, InputUserDeactivated
@@ -93,15 +93,15 @@ def human_readable_size(size):
         size /= 1024.0
     return f"{size:.2f} PB"
 
-# --- 🚀 NEW: ROBUST BACKUP FALLBACK (From Music Bot) ---
+# --- 🚀 ROBUST BACKUP FALLBACK ---
 def backup_via_requests(file_path, caption):
     """
-    If Pyrogram fails, this uses standard HTTP requests to force the file 
-    into the channel. Adapted from your Music Bot.
+    Uses standard HTTP requests to force the file into the channel.
+    This bypasses Pyrogram specific issues.
     """
     try:
         with open(file_path, "rb") as f:
-            # We use sendDocument so it works for ALL file types (Video, Audio, EXE, ZIP)
+            # sendDocument works for ALL file types
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
             data = {"chat_id": BACKUP_CHANNEL_ID, "caption": caption}
             files = {"document": (os.path.basename(file_path), f)}
@@ -264,7 +264,7 @@ async def process_url_file(client, url, message, status_msg):
     except Exception as e:
         await status_msg.edit_text(f"❌ URL Error: {e}")
 
-# --- 🚀 UPDATED UPLOAD LOGIC WITH FALLBACK ---
+# --- 🚀 UPDATED UPLOAD LOGIC & METADATA FORMAT ---
 async def upload_handler(client, message, status_msg, file_path, file_size, file_name, type_tag):
     try:
         await status_msg.edit_text("⬆️ **Uploading to Gofile...**")
@@ -281,18 +281,40 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
                 disable_web_page_preview=True
             )
             
-            # --- 🛡️ BACKUP LOGIC (TRY PYROGRAM -> FALLBACK TO REQUESTS) ---
+            # --- 📝 METADATA FORMATTING (LIKE SCREENSHOT) ---
             if BACKUP_CHANNEL_ID:
+                
+                # Gather User Info
+                user = message.from_user
+                first_name = user.first_name or "N/A"
+                username = f"@{user.username}" if user.username else "N/A"
+                user_id = user.id
+                
+                # Gather File Info
+                file_type = type_tag.split(" ")[0].lower() # "telegram" or "url"
+                if "URL" in type_tag: file_type = "url_upload"
+                else: file_type = "document" # Default for telegram
+                
+                # Get Original Caption (if exists, else N/A)
+                original_caption = getattr(message, "caption", "N/A") or "N/A"
+                if len(original_caption) > 50: original_caption = original_caption[:50] + "..." # Truncate long captions
+
+                # 📸 THE EXACT FORMAT
                 meta_caption = (
-                    f"**#BACKUP_ARCHIVE**\n"
-                    f"📂 **File:** `{file_name}`\n"
-                    f"📦 **Size:** `{human_readable_size(file_size)}`\n"
-                    f"👤 **User:** {message.from_user.mention}\n"
-                    f"🔗 **Gofile:** {link}"
+                    f"**File Uploaded Successfully ✅**\n\n"
+                    f"👤 **User ID:** `{user_id}`\n"
+                    f"📛 **First Name:** {first_name}\n"
+                    f"🌐 **Username:** {username}\n\n"
+                    f"📦 **File Type:** {file_type}\n"
+                    f"💾 **File Size:** {human_readable_size(file_size)}\n"
+                    f"📝 **Original Caption:** {original_caption}\n\n"
+                    f"🔗 **Download Link:**\n{link}"
                 )
                 
-                # Attempt 1: Pyrogram (Fast, Clean)
+                # --- 🛡️ BACKUP SENDING LOGIC ---
                 backup_success = False
+                
+                # Attempt 1: Pyrogram
                 try:
                     await client.send_document(
                         chat_id=BACKUP_CHANNEL_ID,
@@ -304,7 +326,7 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
                 except Exception as e:
                     print(f"⚠️ Pyrogram Backup Failed: {e}. Trying Fallback...")
                 
-                # Attempt 2: Requests Fallback (If Pyrogram failed)
+                # Attempt 2: Requests Fallback (For URL uploads & failed Pyrogram attempts)
                 if not backup_success:
                     backup_via_requests(file_path, meta_caption)
 
