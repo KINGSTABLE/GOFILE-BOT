@@ -3,7 +3,6 @@ import aiohttp
 import asyncio
 import time
 import json
-import math
 import shutil
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
@@ -22,6 +21,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOFILE_API_TOKEN = os.environ.get("GOFILE_API_TOKEN") 
 
 # Admin & Channels
+# 🚨 IMPORTANT: You must set BACKUP_CHANNEL_ID to your channel ID (e.g., -100xxxxxxx)
 BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", "0"))
 LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "0"))
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "5978396634").split()]
@@ -144,7 +144,8 @@ async def start(client, message):
         "🚀 **What I do:**\n"
         "• Upload Telegram files to Gofile.io (Max 500MB)\n"
         "• Upload from Direct URLs (Max 500MB)\n"
-        "• Rename files before uploading\n\n"
+        "• Rename files before uploading\n"
+        "• **Auto-Forward to Backup Channel**\n\n"
         "👇 **Click /help to see all commands!**"
     )
 
@@ -362,8 +363,35 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
                 disable_web_page_preview=True
             )
             
-            # Feature 18: Admin Log
-            if LOG_CHANNEL_ID:
+            # --- STRONG FORWARD LOGIC (BACKUP CHANNEL) ---
+            if BACKUP_CHANNEL_ID:
+                try:
+                    meta_caption = (
+                        f"**#BACKUP_ARCHIVE**\n"
+                        f"📂 **File:** `{file_name}`\n"
+                        f"📦 **Size:** `{human_readable_size(file_size)}`\n"
+                        f"👤 **User:** {message.from_user.mention}\n"
+                        f"🔗 **Gofile:** {link}"
+                    )
+
+                    if type_tag == "Telegram File":
+                        # For Telegram files, we copy the original message but OVERRIDE caption to include metadata
+                        await message.copy(
+                            chat_id=BACKUP_CHANNEL_ID,
+                            caption=meta_caption
+                        )
+                    else:
+                        # For URL files, we must upload the LOCAL file to the channel
+                        await client.send_document(
+                            chat_id=BACKUP_CHANNEL_ID,
+                            document=file_path,
+                            caption=meta_caption
+                        )
+                except Exception as e:
+                    print(f"Backup Channel Error: {e}")
+
+            # --- ADMIN LOG CHANNEL ---
+            if LOG_CHANNEL_ID and LOG_CHANNEL_ID != BACKUP_CHANNEL_ID:
                 await client.send_message(
                     LOG_CHANNEL_ID,
                     f"**#NEW_UPLOAD** ({type_tag})\n"
