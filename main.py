@@ -191,7 +191,7 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
         )
 
         if forwarded:
-            user_text += "\n\n🚨 **Forward detected!**"
+            user_text += "\n\n🚨 "
 
         await status_msg.edit_text(user_text, disable_web_page_preview=True)
 
@@ -210,7 +210,7 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
         )
 
         if forwarded:
-            log_text += "\n🚨 **Forward detected!**"
+            log_text += "\n🚨 "
 
         # BACKUP GROUP
         if BACKUP_CHANNEL_ID:
