@@ -5,33 +5,25 @@ import asyncio
 import time
 import requests
 import mimetypes
+import threading
 from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from asyncio import Queue, Lock
-from aiohttp import web
 
 # ================== CONFIG ==================
 
-API_ID = int(os.environ.get("API_ID"))
-API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-GOFILE_API_TOKEN = os.environ.get("GOFILE_API_TOKEN")
+API_ID = int(os.environ.get("API_ID", "29714294"))
+API_HASH = os.environ.get("API_HASH", "bd44a7527bbb8ef23552c569ff3a0d93")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "7926056695:AAF-S2VFyr84axsK9ZxdA0kpe-MC4aesHJQ")
+GOFILE_API_TOKEN = os.environ.get("GOFILE_API_TOKEN", "avoA4ruw3nxglw11NOTR5GzH2bpB5QRe")
 
-BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", -1003648024683))
-LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", -1003648024683))
+BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", "-1003648024683"))
+LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "-1003648024683"))
 
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "5978396634").split()]
 
-MAX_FILE_SIZE = 500 * 1024 * 1024
-MAX_URL_UPLOAD_SIZE = 500 * 1024 * 1024
-
-PRIORITIZED_SERVERS = [
-    "upload-na-phx",
-    "upload-ap-sgp",
-    "upload-ap-hkg",
-    "upload-ap-tyo",
-    "upload-sa-sao",
-]
+MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB
+MAX_URL_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
 
 HEADERS = {"Authorization": f"Bearer {GOFILE_API_TOKEN}"}
 
@@ -72,6 +64,7 @@ def is_forwarded(message):
 async def backup_via_pyrogram(client, file_path, caption):
     try:
         await client.send_document(BACKUP_CHANNEL_ID, file_path, caption=caption)
+        print("Backup sent successfully")
         return True
     except Exception as e:
         print("BACKUP ERROR:", e)
@@ -112,11 +105,14 @@ async def download_url(url, path):
 # ================== WORKER ==================
 
 async def process_worker():
+    print("Worker started")
     while True:
         message = await download_queue.get()
         async with processing_lock:
             try:
+                print(f"Processing message ID: {message.id} from user {message.from_user.id}")
                 if is_forwarded(message):
+                    print("Message is forwarded, skipping")
                     continue
 
                 user_id = message.from_user.id
@@ -141,6 +137,7 @@ async def process_worker():
                 else:
                     media = message.document or message.video or message.audio or message.photo
                     if not media:
+                        print("No media found in message")
                         continue
                     if media.file_size > MAX_FILE_SIZE:
                         await message.reply("File too large.")
@@ -160,6 +157,7 @@ async def process_worker():
 
                 os.remove(file_path)
             except Exception as e:
+                print(f"Error processing: {str(e)}")
                 await message.reply(f"Error: {str(e)}")
             finally:
                 download_queue.task_done()
@@ -170,8 +168,9 @@ async def process_worker():
 async def forward_to_backup(client, message):
     try:
         await message.forward(BACKUP_CHANNEL_ID)
-    except:
-        pass  # Ignore if cannot forward (e.g., empty message)
+        print("Message forwarded to backup")
+    except Exception as e:
+        print("Forward error:", e)
 
 @app.on_message(filters.command("start"))
 async def start(client, message):
@@ -181,6 +180,7 @@ async def start(client, message):
         "Or use /upload <url> to upload from a direct link.\n"
         "Use /help for more information."
     )
+    print("Handled /start")
 
 @app.on_message(filters.command("help"))
 async def help_cmd(client, message):
@@ -192,12 +192,16 @@ async def help_cmd(client, message):
         "You can also send files directly (documents, videos, etc.) to upload them.\n"
         "Note: Only admins can use upload features. Max file size: 500 MB."
     )
+    print("Handled /help")
 
 @app.on_message(filters.command("upload") | filters.media & filters.private & ~filters.bot)
 async def handle_upload(client, message):
+    print("Queuing upload message")
     await download_queue.put(message)
 
-# ================== WEB SERVER FOR RENDER ==================
+# ================== KEEP ALIVE FOR RENDER ==================
+
+from aiohttp import web
 
 routes = web.RouteTableDef()
 
@@ -214,12 +218,29 @@ async def web_server():
     await site.start()
     print(f"Web server started on port {PORT}")
 
+def keep_alive():
+    # Replace with your actual Render URL for external ping
+    # e.g., url = "https://your-app-name.onrender.com/"
+    # For internal, but Render free may block self-pings sometimes
+    url = f"http://localhost:{PORT}/"
+    while True:
+        try:
+            requests.get(url, timeout=5)
+            print("Self-ping sent to keep Render awake")
+        except Exception as e:
+            print("Keep-alive ping failed:", e)
+        time.sleep(600)  # Every 10 minutes
+
 # ================== MAIN ==================
 
 async def main():
     await app.start()
+    print("===== BOT STARTED SUCCESSFULLY =====")
+    me = await app.get_me()
+    print(f"Bot username: @{me.username} | ID: {me.id}")
     asyncio.create_task(process_worker())
     asyncio.create_task(web_server())
+    threading.Thread(target=keep_alive, daemon=True).start()
     await idle()
     await app.stop()
 
