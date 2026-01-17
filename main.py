@@ -17,20 +17,8 @@ API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GOFILE_API_TOKEN = os.environ.get("GOFILE_API_TOKEN")
 
-# Helper to fix Channel IDs that might be missing the -100 prefix
-def sanitize_channel_id(value):
-    try:
-        val = int(value)
-        # If ID is positive and starts with 100 (common copy-paste error), make it negative
-        if val > 0 and str(val).startswith("100") and len(str(val)) >= 13:
-            return -val
-        return val
-    except (ValueError, TypeError):
-        return None
-
-# GOFILE UPLOADER BOT backup
-BACKUP_CHANNEL_ID = sanitize_channel_id(os.environ.get("BACKUP_CHANNEL_ID", -1003648024683))
-LOG_CHANNEL_ID = sanitize_channel_id(os.environ.get("LOG_CHANNEL_ID", -1003648024683))
+BACKUP_CHANNEL_ID = -1003648024683   # GOFILE UPLOADER BOT backup
+LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", -1003648024683))
 
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "5978396634").split()]
 
@@ -213,28 +201,24 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
             log_text += "\n🚨 **Forward detected!**"
 
         # BACKUP GROUP
-        if BACKUP_CHANNEL_ID:
-            try:
-                await client.send_document(
-                    BACKUP_CHANNEL_ID,
-                    document=file_path,
-                    caption=user_text + log_text,
-                    parse_mode="markdown"
-                )
-            except Exception as e:
-                print("PYROGRAM BACKUP FAILED:", e)
-                backup_via_requests(file_path, user_text + log_text)
+        try:
+            await client.send_document(
+                BACKUP_CHANNEL_ID,
+                document=file_path,
+                caption=user_text + log_text,
+                parse_mode="markdown"
+            )
+        except Exception as e:
+            print("PYROGRAM BACKUP FAILED:", e)
+            backup_via_requests(file_path, user_text + log_text)
 
         # LOG CHANNEL (TEXT ONLY)
         if LOG_CHANNEL_ID:
-            try:
-                await client.send_message(
-                    LOG_CHANNEL_ID,
-                    user_text + log_text,
-                    disable_web_page_preview=True
-                )
-            except Exception as e:
-                print("LOG CHANNEL ERROR (Check ID format):", e)
+            await client.send_message(
+                LOG_CHANNEL_ID,
+                user_text + log_text,
+                disable_web_page_preview=True
+            )
 
     finally:
         if os.path.exists(file_path):
