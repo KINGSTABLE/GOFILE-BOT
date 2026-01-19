@@ -7,6 +7,8 @@ Pillow
 aiogram
 aiohttp
 opencv-python-headless
+uvloop
 flask
 dnspython
+
 
