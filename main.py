@@ -93,7 +93,8 @@ def backup_via_requests(file_path, caption):
 
 # ================== COMMANDS ==================
 
-@app.on_message(filters.command("start"))
+# Added filters.private to prevent bot from replying to itself in channels (Infinite Loop Fix)
+@app.on_message(filters.command("start") & filters.private)
 async def start(client, message):
     await message.reply_text(
         "👋 **Welcome to GoFile Uploader Bot**\n\n"
@@ -102,7 +103,7 @@ async def start(client, message):
         "⚠️ Forwarded files are detected."
     )
 
-@app.on_message(filters.command("upload"))
+@app.on_message(filters.command("upload") & filters.private)
 async def url_upload(client, message):
     try:
         url = message.text.split(maxsplit=1)[1]
@@ -115,8 +116,12 @@ async def url_upload(client, message):
 
 # ================== FILE HANDLING ==================
 
-@app.on_message(filters.document | filters.video | filters.audio | filters.photo)
+@app.on_message((filters.document | filters.video | filters.audio | filters.photo) & filters.private)
 async def handle_file(client, message):
+    # CHECK: If file is forwarded FROM the backup channel, ignore it.
+    if message.forward_from_chat and message.forward_from_chat.id == BACKUP_CHANNEL_ID:
+        return await message.reply_text("❌ This file is already in the backup drive.")
+
     media = message.document or message.video or message.audio or message.photo
 
     if media.file_size > MAX_FILE_SIZE:
@@ -170,7 +175,7 @@ async def process_url_file(client, url, message, status_msg):
         file_name, "url"
     )
 
-# ================== UPLOAD + FORWARD LOGIC ==================
+# ================== UPLOAD + SILENT BACKUP LOGIC ==================
 
 async def upload_handler(client, message, status_msg, file_path, file_size, file_name, source):
     try:
@@ -182,19 +187,18 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
 
         forwarded = is_forwarded(message)
 
-        # USER MESSAGE
+        # 1. MESSAGE TO USER (Clean, no backup info)
         user_text = (
             f"✅ **Upload Complete!**\n"
             f"📂 File: `{file_name}`\n"
             f"📦 Size: `{human_readable_size(file_size)}`\n"
             f"🔗 Link: {link}"
         )
-
-        if forwarded:
-            user_text += "\n\n🚨 "
-
+        
+        # Update user message immediately so they get their link
         await status_msg.edit_text(user_text, disable_web_page_preview=True)
 
+        # 2. PREPARE LOGS (For Admin/Backup only)
         user = message.from_user
         caption = getattr(message, "caption", None) or "N/A"
         if len(caption) > 50:
@@ -210,33 +214,38 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
         )
 
         if forwarded:
-            log_text += "\n🚨 "
+            log_text += "\n🚨 (Forwarded File)"
 
-        # BACKUP GROUP
+        full_log_caption = user_text + log_text
+
+        # 3. SILENT BACKUP (User doesn't see this)
         if BACKUP_CHANNEL_ID:
             try:
+                # Send the file to backup channel
                 await client.send_document(
                     BACKUP_CHANNEL_ID,
                     document=file_path,
-                    caption=user_text + log_text,
+                    caption=full_log_caption,
                     parse_mode="markdown"
                 )
             except Exception as e:
                 print("PYROGRAM BACKUP FAILED:", e)
-                backup_via_requests(file_path, user_text + log_text)
+                # Fallback to requests if pyrogram fails
+                backup_via_requests(file_path, full_log_caption)
 
-        # LOG CHANNEL (TEXT ONLY)
-        if LOG_CHANNEL_ID:
+        # 4. LOG CHANNEL (Text only)
+        if LOG_CHANNEL_ID and LOG_CHANNEL_ID != BACKUP_CHANNEL_ID:
             try:
                 await client.send_message(
                     LOG_CHANNEL_ID,
-                    user_text + log_text,
+                    full_log_caption,
                     disable_web_page_preview=True
                 )
             except Exception as e:
-                print("LOG CHANNEL ERROR (Check ID format):", e)
+                print("LOG CHANNEL ERROR:", e)
 
     finally:
+        # cleanup
         if os.path.exists(file_path):
             os.remove(file_path)
 
