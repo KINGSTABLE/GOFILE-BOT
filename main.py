@@ -6,10 +6,15 @@ import time
 import requests
 import mimetypes
 import logging
+import uvloop
 from datetime import datetime
 from pyrogram import Client, filters, idle
 from asyncio import Queue, Lock
 from aiohttp import web
+
+# ================== SPEED OPTIMIZATION ==================
+# Install uvloop to make asyncio 2-4x faster
+uvloop.install()
 
 # ================== CONFIGURATION ==================
 
@@ -22,7 +27,6 @@ GOFILE_API_TOKEN = os.environ.get("GOFILE_API_TOKEN")
 def sanitize_channel_id(value):
     try:
         val = int(value)
-        # Fix common copy-paste issue where -100 is missing
         if val > 0 and str(val).startswith("100") and len(str(val)) >= 13:
             return -val
         return val
@@ -33,8 +37,11 @@ BACKUP_CHANNEL_ID = sanitize_channel_id(os.environ.get("BACKUP_CHANNEL_ID"))
 LOG_CHANNEL_ID = sanitize_channel_id(os.environ.get("LOG_CHANNEL_ID"))
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split() if x.isdigit()]
 
-# No software limit; limits depend on Render disk space (approx 10GB+)
+# LIMITS: Effectively unlimited for Render (Disk dependent)
 MAX_FILE_SIZE = 50 * 1024 * 1024 * 1024 
+
+# OPTIMIZED CHUNK SIZE: 4MB (Fast I/O, Low RAM)
+CHUNK_SIZE = 4 * 1024 * 1024 
 
 PRIORITIZED_SERVERS = [
     "upload-na-phx", "upload-ap-sgp", "upload-ap-hkg", 
@@ -51,11 +58,13 @@ logger = logging.getLogger(__name__)
 
 # ================== BOT INSTANCE ==================
 
+# Increased workers to handle background tasks faster
 app = Client(
     "ultimate_gofile_bot",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN
+    bot_token=BOT_TOKEN,
+    workers=10
 )
 
 download_queue = Queue()
@@ -93,7 +102,6 @@ async def immediate_backup(client, message, is_url=False, url_text=None):
                 f"{user_info}🔗 **URL Source:**\n`{url_text}`"
             )
         else:
-            # copy_message preserves the file on Telegram servers
             await client.copy_message(
                 chat_id=BACKUP_CHANNEL_ID,
                 from_chat_id=message.chat.id,
@@ -108,11 +116,10 @@ async def immediate_backup(client, message, is_url=False, url_text=None):
 @app.on_message(filters.command("start") & filters.private)
 async def start(client, message):
     await message.reply_text(
-        "👋 **Welcome to the Ultimate Streamlined Uploader**\n\n"
-        "🚀 **How to use:**\n"
-        "1. Send any file.\n"
-        "2. Send any HTTP/HTTPS URL.\n\n"
-        "🤖 I will backup the file first, then generate a GoFile link for you."
+        "⚡ **High-Performance Uploader Online**\n\n"
+        "🚀 **System:** uvloop enabled (Fast Mode)\n"
+        "📂 **Send:** Files or URLs\n\n"
+        "I will backup your data and process it at maximum speed."
     )
 
 # ================== URL DETECTION & HANDLING ==================
@@ -121,14 +128,13 @@ async def start(client, message):
 async def url_handler(client, message):
     text = message.text.strip()
     
-    # Validates if text looks like a URL
     if not (text.startswith("http://") or text.startswith("https://")):
         return 
 
     # 1. IMMEDIATE BACKUP
     await immediate_backup(client, message, is_url=True, url_text=text)
 
-    msg = await message.reply_text("🔗 **URL Detected!**\nAdded to processing queue...")
+    msg = await message.reply_text("🔗 **URL Detected!**\n🚀 Queued for High-Speed Process...")
     await download_queue.put(("url", text, message, msg))
     
     asyncio.create_task(process_queue(client))
@@ -137,7 +143,6 @@ async def url_handler(client, message):
 
 @app.on_message((filters.document | filters.video | filters.audio | filters.photo) & filters.private)
 async def file_handler(client, message):
-    # Ignore messages from the backup channel itself to prevent loops
     if message.chat.id == BACKUP_CHANNEL_ID:
         return
 
@@ -146,7 +151,7 @@ async def file_handler(client, message):
 
     media = message.document or message.video or message.audio or message.photo
     
-    msg = await message.reply_text("📁 **File Detected!**\nAdded to processing queue...")
+    msg = await message.reply_text("📁 **File Detected!**\n🚀 Queued for High-Speed Process...")
     await download_queue.put(("file", media, message, msg))
     
     asyncio.create_task(process_queue(client))
@@ -167,11 +172,11 @@ async def process_queue(client):
             except Exception as e:
                 logger.error(f"Queue Error: {e}")
                 try:
-                    await task[3].edit_text(f"❌ **Error during processing:**\n`{str(e)}`")
+                    await task[3].edit_text(f"❌ **Error:**\n`{str(e)}`")
                 except:
                     pass
 
-# ================== DOWNLOAD LOGIC (STREAMLINED) ==================
+# ================== FAST DOWNLOAD LOGIC ==================
 
 async def process_tg_file(client, media, message, status_msg):
     file_name = getattr(media, "file_name", f"file_{message.id}_{int(time.time())}")
@@ -180,10 +185,10 @@ async def process_tg_file(client, media, message, status_msg):
     await status_msg.edit_text(
         f"⬇️ **Downloading...**\n"
         f"📦 Size: `{human_readable_size(media.file_size)}`\n"
-        f"⚡ Mode: Streamlined"
+        f"⚡ Mode: Native Stream"
     )
 
-    # Pyrogram handles chunked downloads automatically
+    # Pyrogram download with default optimized chunking
     await client.download_media(message, file_path)
 
     await upload_handler(
@@ -193,7 +198,6 @@ async def process_tg_file(client, media, message, status_msg):
     )
 
 async def process_url_file(client, url, message, status_msg):
-    # Try to guess filename from URL
     try:
         file_name = url.split("/")[-1].split("?")[0]
     except:
@@ -204,17 +208,18 @@ async def process_url_file(client, url, message, status_msg):
         
     file_path = os.path.join(DOWNLOAD_DIR, file_name)
 
-    await status_msg.edit_text("⬇️ **Downloading from URL...**\n⏳ Establishing Stream...")
+    await status_msg.edit_text("⬇️ **Fast Downloading...**\n⏳ Mode: Optimized HTTP Stream")
 
-    # Stream download to disk (Low RAM usage)
-    async with aiohttp.ClientSession() as session:
+    # Use TCPConnector to speed up connection handshake
+    connector = aiohttp.TCPConnector(limit=None, ttl_dns_cache=300)
+    async with aiohttp.ClientSession(connector=connector) as session:
         async with session.get(url, timeout=None) as response:
             if response.status != 200:
                 return await status_msg.edit_text(f"❌ URL Error: {response.status}")
             
             with open(file_path, "wb") as f:
-                # 1MB Chunks
-                async for chunk in response.content.iter_chunked(1024 * 1024):
+                # Optimized Chunk Size (4MB) reduces Disk I/O syscalls
+                async for chunk in response.content.iter_chunked(CHUNK_SIZE):
                     f.write(chunk)
 
     final_size = os.path.getsize(file_path)
@@ -229,9 +234,8 @@ async def process_url_file(client, url, message, status_msg):
 
 async def upload_handler(client, message, status_msg, file_path, file_size, file_name, source):
     try:
-        await status_msg.edit_text("⬆️ **Uploading to GoFile...**\n🚀 Pipeline Active")
+        await status_msg.edit_text("⬆️ **Fast Uploading to GoFile...**\n🚀 Optimized Buffer Active")
         
-        # Upload using streaming to save RAM
         link = await upload_to_gofile(file_path)
 
         if not link:
@@ -261,7 +265,6 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
             )
             
             try:
-                # Send the final details to the backup channel
                 await client.send_message(
                     BACKUP_CHANNEL_ID,
                     log_text,
@@ -274,34 +277,31 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
         logger.error(f"Upload Handler Error: {e}")
         await status_msg.edit_text(f"❌ Critical Error: {e}")
     finally:
-        # CLEANUP: Remove file from disk to free up space for next user
+        # CLEANUP
         if os.path.exists(file_path):
             os.remove(file_path)
 
-# ================== GOFILE UPLOADER (STREAMED) ==================
+# ================== GOFILE UPLOADER (OPTIMIZED) ==================
 
 async def upload_to_gofile(path):
-    """
-    Uploads file to GoFile using a stream to keep RAM usage low.
-    """
     mime_type, _ = mimetypes.guess_type(path)
     if mime_type is None:
         mime_type = "application/octet-stream"
 
-    # Try servers until one works
+    # Reuse connector for speed
+    connector = aiohttp.TCPConnector(limit=None, ttl_dns_cache=300)
+
     for server in PRIORITIZED_SERVERS:
         try:
             url = f"https://{server}.gofile.io/uploadfile"
             
-            # Using aiohttp with an open file object creates a stream
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(connector=connector) as session:
                 with open(path, "rb") as f:
                     data = aiohttp.FormData()
                     # GoFile requires the file field
                     data.add_field('file', f, filename=os.path.basename(path), content_type=mime_type)
                     data.add_field('token', GOFILE_API_TOKEN)
                     
-                    # Optional: Add folderId if you have one set in ENV
                     folder_id = os.environ.get("GOFILE_FOLDER_ID")
                     if folder_id:
                         data.add_field('folderId', folder_id)
@@ -320,7 +320,7 @@ async def upload_to_gofile(path):
 # ================== WEB SERVER (RENDER KEEP-ALIVE) ==================
 
 async def web_handler(request):
-    return web.Response(text="Bot is Running | Pipeline Active")
+    return web.Response(text="Bot is Running | High Speed Mode Active")
 
 async def start_web():
     appw = web.Application()
@@ -335,15 +335,16 @@ async def start_web():
 # ================== MAIN EXECUTION ==================
 
 async def main():
-    print("🤖 Bot Starting...")
+    print("🤖 Bot Starting with uvloop optimization...")
     await app.start()
     print("✅ Bot Connected to Telegram")
     print("🌍 Starting Web Server...")
     await start_web()
-    print("🚀 Pipeline Ready. Waiting for requests.")
+    print("🚀 High Speed Pipeline Ready. Waiting for requests.")
     await idle()
     await app.stop()
 
 if __name__ == "__main__":
+    # uvloop is installed at the top level, so standard run works
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
