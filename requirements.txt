@@ -8,3 +8,4 @@ aiogram
 aiohttp
 opencv-python-headless
 flask
+dnspython
