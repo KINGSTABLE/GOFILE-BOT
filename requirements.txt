@@ -1,7 +1,7 @@
 requests
 termcolor
 python-telegram-bot
-pyrogram
+pyrofork
 TgCrypto
 Pillow
 aiogram
@@ -9,3 +9,4 @@ aiohttp
 opencv-python-headless
 flask
 dnspython
+
