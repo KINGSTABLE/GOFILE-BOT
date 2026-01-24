@@ -3,6 +3,5 @@ TgCrypto>=1.2.5
 aiohttp>=3.9.0
 uvloop>=0.19.0
 apscheduler>=3.10.4
-sqlite3
 requests>=2.31.0
 python-dotenv>=1.0.0
