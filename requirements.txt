@@ -1,5 +1,5 @@
-pyrofork
-TgCrypto
+pyrofork==2.3.69
+TgCrypto==1.2.8  # or latest compatible
 aiohttp
 uvloop
 requests
