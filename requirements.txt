@@ -1,15 +1,6 @@
-requests
-termcolor
-python-telegram-bot
-pyrofork
+Pyrofork
 TgCrypto
-Pillow
-aiogram
 aiohttp
-opencv-python-headless
 uvloop
-flask
-dnspython
+requests
 apscheduler
-
-
