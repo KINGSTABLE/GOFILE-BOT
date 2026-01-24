@@ -10,6 +10,6 @@ opencv-python-headless
 uvloop
 flask
 dnspython
-mimetypes
 apscheduler
+
 
