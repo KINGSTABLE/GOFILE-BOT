@@ -9,15 +9,20 @@ import sqlite3
 import traceback
 import uvloop
 import aiohttp
-from datetime import datetime, timedelta
-from typing import Union, List
+from datetime import datetime
 
 # Pyrogram / Pyrofork
 from pyrogram import Client, filters, enums
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import (
+    Message, InlineKeyboardMarkup, InlineKeyboardButton, 
+    CallbackQuery, InputMediaDocument
+)
 from pyrogram.errors import FloodWait, UserNotParticipant, RPCError
 
-# Environment Variables
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+
 API_ID = int(os.environ.get("API_ID", "0"))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -27,11 +32,11 @@ GOFILE_API_TOKEN = os.environ.get("GOFILE_API_TOKEN", "")
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split() if x.isdigit()]
 LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "0"))
 
-# Config
+# Constants
 DOWNLOAD_DIR = "downloads"
 DB_NAME = "bot_database.db"
-CHUNK_SIZE = 4 * 1024 * 1024  # 4MB Chunk
-MAX_CONCURRENT_UPLOADS = 5     # Limit parallel uploads
+CHUNK_SIZE = 4 * 1024 * 1024  
+MAX_CONCURRENT_UPLOADS = 10   
 
 # Logging Setup
 logging.basicConfig(
@@ -40,7 +45,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("GoFileBot")
 
-# Install uvloop
+# Install high-performance event loop
 uvloop.install()
 
 # ==============================================================================
@@ -54,7 +59,6 @@ class Database:
         self.create_tables()
 
     def create_tables(self):
-        # Users Table
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -62,7 +66,6 @@ class Database:
                 join_date TEXT
             )
         """)
-        # Force Subscribe Channels Table
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS fsub_channels (
                 channel_id INTEGER PRIMARY KEY,
@@ -108,7 +111,7 @@ class Database:
 db = Database(DB_NAME)
 
 # ==============================================================================
-# CLIENT & QUEUE SETUP
+# CLIENT SETUP
 # ==============================================================================
 
 class Bot(Client):
@@ -128,9 +131,9 @@ class Bot(Client):
         logger.info("Bot Started Successfully!")
         if LOG_CHANNEL_ID:
             try:
-                await self.send_message(LOG_CHANNEL_ID, "🤖 **System Online**\nHigh-Performance Mode: ON")
-            except Exception as e:
-                logger.error(f"Failed to send log on start: {e}")
+                await self.send_message(LOG_CHANNEL_ID, "🟢 **System Online**\nBot is ready to serve users.")
+            except Exception:
+                pass
 
     async def stop(self, *args):
         await super().stop()
@@ -149,6 +152,21 @@ def human_readable_size(size):
         size /= 1024
     return f"{size:.2f} PB"
 
+def get_detailed_log(user, file_type, file_size, link):
+    """Generates the specific log format requested."""
+    return (
+        f"**Date:** `{datetime.now().isoformat()}`\n"
+        f"**User ID:** `{user.id}`\n"
+        f"**First Name:** {user.first_name}\n"
+        f"**Last Name:** {user.last_name if user.last_name else 'N/A'}\n"
+        f"**Username:** @{user.username if user.username else 'N/A'}\n"
+        f"**Chat ID:** `{user.id}`\n"
+        f"**File Type:** `{file_type}`\n"
+        f"**File Size:** `{human_readable_size(file_size)}`\n"
+        f"**Download Link:** {link}\n\n"
+        f"#UPLOAD #LOG"
+    )
+
 async def check_force_subscribe(client, message):
     if message.from_user.id in ADMIN_IDS:
         return True
@@ -163,20 +181,20 @@ async def check_force_subscribe(client, message):
             await client.get_chat_member(chat_id, message.from_user.id)
         except (UserNotParticipant, RPCError):
             missing_channels.append(link)
-        except Exception as e:
-            logger.error(f"FSub Check Error: {e}")
+        except Exception:
+            pass
 
     if missing_channels:
         buttons = [[InlineKeyboardButton("📢 Join Channel", url=link)] for link in missing_channels]
         await message.reply_text(
-            "🔒 **Access Denied**\n\nYou must join our update channels to use this bot.",
+            "🔒 **Access Restricted**\n\nPlease join our update channels to continue using this bot.",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
         return False
     return True
 
 async def alert_admins(client, error_text):
-    text = f"🚨 **System Error Alert**\n\n```\n{error_text}\n```"
+    text = f"🚨 **Admin Alert**\n\nError Detected:\n`{error_text}`"
     for admin in ADMIN_IDS:
         try:
             await client.send_message(admin, text)
@@ -184,326 +202,279 @@ async def alert_admins(client, error_text):
             pass
 
 # ==============================================================================
-# MANAGEMENT COMMANDS (FSUB, BROADCAST, ADS)
+# USER INTERFACE COMMANDS (Start, Help, About)
 # ==============================================================================
 
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     db.add_user(message.from_user.id, message.from_user.username)
-    if await check_force_subscribe(client, message):
-        await message.reply_text(
-            f"👋 **Hello {message.from_user.first_name}!**\n\n"
-            "🚀 **GoFile High-Speed Uploader**\n"
-            "📂 Send me any File or URL.\n"
-            "⚡ Powered by `uvloop` & `aiohttp`\n\n"
-            "Maintained by Admin."
+    if not await check_force_subscribe(client, message):
+        return
+
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📚 Help", callback_data="help"), InlineKeyboardButton("ℹ️ About", callback_data="about")],
+        [InlineKeyboardButton("📢 Updates Channel", url="https://t.me/TOOLS_BOTS_KING")]
+    ])
+
+    await message.reply_text(
+        f"👋 **Welcome, {message.from_user.first_name}!**\n\n"
+        "I am your advanced **GoFile Uploader**.\n"
+        "Send me any file or direct URL, and I will upload it for you instantly.\n\n"
+        "⚡ **Fast & Secure** | ♾️ **Unlimited**\n"
+        "🤖 Powered by @TOOLS_BOTS_KING",
+        reply_markup=buttons
+    )
+
+@bot.on_message(filters.command("help") & filters.private)
+async def help_command(client, message):
+    await help_handler(client, message)
+
+async def help_handler(client, message):
+    text = (
+        "📚 **Bot Help Menu**\n\n"
+        "**📂 How to Upload?**\n"
+        "• Send any file (Video, Audio, Document).\n"
+        "• Send a direct download URL (http/https).\n\n"
+        "**🛠️ Available Commands:**\n"
+        "/start - Restart the bot\n"
+        "/help - Show this menu\n"
+        "/about - Bot information\n\n"
+        "**👮‍♂️ Admin Commands:**\n"
+        "/stats - Check user base\n"
+        "/broadcast - Send message to all users\n"
+        "/ads - Schedule auto-ads\n"
+        "/addfsub - Add Force Subscribe\n"
+        "/delfsub - Remove Force Subscribe"
+    )
+    buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="start")]])
+    
+    if isinstance(message, Message):
+        await message.reply_text(text, reply_markup=buttons)
+    else:
+        await message.edit_message_text(text, reply_markup=buttons)
+
+@bot.on_callback_query()
+async def callback_handler(client, callback):
+    if callback.data == "help":
+        await help_handler(client, callback.message)
+    elif callback.data == "about":
+        text = (
+            "ℹ️ **About This Bot**\n\n"
+            "This is a high-performance GoFile uploader bot designed for speed and reliability.\n\n"
+            "**Language:** Python 3\n"
+            "**Developer:** @TOOLS_BOTS_KING"
         )
+        buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="start")]])
+        await callback.message.edit_message_text(text, reply_markup=buttons)
+    elif callback.data == "start":
+        await start_handler(client, callback.message)
+
+# ==============================================================================
+# ADMIN COMMANDS
+# ==============================================================================
 
 @bot.on_message(filters.command("stats") & filters.user(ADMIN_IDS))
 async def stats_handler(client, message):
     count = db.count_users()
-    await message.reply_text(f"📊 **Bot Statistics**\n\n👥 Total Users: `{count}`")
-
-# --- FORCE SUBSCRIBE ---
-
-@bot.on_message(filters.command("addfsub") & filters.user(ADMIN_IDS))
-async def add_fsub_handler(client, message):
-    # Usage: /addfsub -10012345678 https://t.me/joinchat/xxx
-    try:
-        _, chat_id, link = message.text.split(" ", 2)
-        db.add_fsub(int(chat_id), link)
-        await message.reply_text("✅ **Force Subscribe Channel Added!**")
-    except ValueError:
-        await message.reply_text("❌ Usage: `/addfsub [ChannelID] [InviteLink]`")
-
-@bot.on_message(filters.command("delfsub") & filters.user(ADMIN_IDS))
-async def del_fsub_handler(client, message):
-    try:
-        _, chat_id = message.text.split(" ", 1)
-        db.remove_fsub(int(chat_id))
-        await message.reply_text("🗑️ **Force Subscribe Channel Removed!**")
-    except ValueError:
-        await message.reply_text("❌ Usage: `/delfsub [ChannelID]`")
-
-# --- BROADCAST ---
+    await message.reply_text(f"📊 **Live Statistics**\n\n👥 Total Users: `{count}`")
 
 @bot.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS))
 async def broadcast_handler(client, message):
     if not message.reply_to_message:
-        return await message.reply_text("❌ **Reply to a message** to broadcast it.")
-
-    msg = await message.reply_text("🚀 **Starting Broadcast...**")
+        return await message.reply_text("⚠️ **Reply to a message** to broadcast.")
+    
+    msg = await message.reply_text("🚀 **Broadcasting...**")
     users = db.get_all_users()
-    sent = 0
-    failed = 0
-
+    sent, failed = 0, 0
     for user_id in users:
         try:
             await message.reply_to_message.copy(user_id)
             sent += 1
-            await asyncio.sleep(0.1) # FloodWait prevention
-        except Exception:
+            await asyncio.sleep(0.05)
+        except:
             failed += 1
-    
-    await msg.edit_text(f"✅ **Broadcast Complete**\n\n📢 Sent: {sent}\n❌ Failed: {failed}")
-
-# --- ADS SCHEDULER ---
-
-async def schedule_ads_task(client, message_to_copy, interval_sec, repetitions):
-    for i in range(repetitions):
-        await asyncio.sleep(interval_sec)
-        users = db.get_all_users()
-        sent_count = 0
-        for user_id in users:
-            try:
-                await message_to_copy.copy(user_id)
-                sent_count += 1
-                await asyncio.sleep(0.05)
-            except:
-                pass
-        
-        # Log Ad Status
-        if LOG_CHANNEL_ID:
-            await client.send_message(
-                LOG_CHANNEL_ID, 
-                f"📢 **Ad Cycle {i+1}/{repetitions} Completed**\nReached: {sent_count} users."
-            )
+    await msg.edit_text(f"✅ **Broadcast Done**\nSent: `{sent}` | Failed: `{failed}`")
 
 @bot.on_message(filters.command("ads") & filters.user(ADMIN_IDS))
-async def ads_setup_handler(client, message):
-    # Usage: /ads 1d 3 (Reply to the ad message)
-    # Formats: 1d (day), 1h (hour), 1w (week)
+async def ads_handler(client, message):
     if not message.reply_to_message:
-        return await message.reply_text("❌ **Reply to the Ad message**.")
-    
+        return await message.reply_text("⚠️ **Reply to a message** to schedule as ad.")
     try:
         args = message.text.split()
-        if len(args) < 3:
-            raise ValueError
+        time_val = int(''.join(filter(str.isdigit, args[1])))
+        unit = ''.join(filter(str.isalpha, args[1])).lower()
+        count = int(args[2])
         
-        time_str = args[1].lower()
-        repetitions = int(args[2])
-        
-        value = int(''.join(filter(str.isdigit, time_str)))
-        unit = ''.join(filter(str.isalpha, time_str))
-        
-        seconds = 0
-        if 'd' in unit: seconds = value * 86400
-        elif 'w' in unit: seconds = value * 604800
-        elif 'h' in unit: seconds = value * 3600
-        elif 'm' in unit: seconds = value * 60
-        else: return await message.reply_text("❌ Invalid format. Use d/w/h/m (e.g., 1d).")
+        seconds = time_val * (86400 if 'd' in unit else 3600 if 'h' in unit else 60)
+        asyncio.create_task(run_ads(client, message.reply_to_message, seconds, count))
+        await message.reply_text("✅ **Ads Scheduled!**")
+    except:
+        await message.reply_text("❌ Usage: `/ads 1h 5` (Reply to message)")
 
-        # Calculate scheduling interval (Gap between ads)
-        # If user says 1d 3 -> Spread 3 ads over 1 day? Or wait 1 day then send?
-        # Standard logic: Wait 'seconds' then send, repeat 'repetitions' times.
-        
-        asyncio.create_task(schedule_ads_task(client, message.reply_to_message, seconds, repetitions))
-        
-        await message.reply_text(
-            f"✅ **Ad Campaign Scheduled!**\n\n"
-            f"⏳ Interval: `{seconds}` seconds\n"
-            f"🔁 Repeats: `{repetitions}` times\n"
-            f"📢 Status: Running in background."
-        )
+async def run_ads(client, msg, interval, count):
+    for _ in range(count):
+        await asyncio.sleep(interval)
+        users = db.get_all_users()
+        for uid in users:
+            try:
+                await msg.copy(uid)
+                await asyncio.sleep(0.05)
+            except: pass
 
-    except Exception as e:
-        await message.reply_text("❌ Usage: `/ads [Time] [Count]`\nExample: `/ads 1h 5` (Every 1 hour, 5 times)")
+@bot.on_message(filters.command("addfsub") & filters.user(ADMIN_IDS))
+async def addfsub(client, message):
+    try:
+        _, cid, link = message.text.split(maxsplit=2)
+        db.add_fsub(int(cid), link)
+        await message.reply_text("✅ **FSub Added**")
+    except:
+        await message.reply_text("❌ Usage: `/addfsub -100xxxx link`")
+
+@bot.on_message(filters.command("delfsub") & filters.user(ADMIN_IDS))
+async def delfsub(client, message):
+    try:
+        db.remove_fsub(int(message.text.split()[1]))
+        await message.reply_text("✅ **FSub Removed**")
+    except:
+        await message.reply_text("❌ Usage: `/delfsub -100xxxx`")
 
 # ==============================================================================
-# FILE & URL HANDLING
+# FILE & URL PROCESSING
 # ==============================================================================
 
 @bot.on_message(filters.text & filters.private)
-async def url_detector(client, message):
-    if message.text.startswith("/") or not (message.text.startswith("http")):
-        return # Ignore commands and non-urls
-    
+async def url_handler(client, message):
+    if message.text.startswith("/") or not message.text.startswith("http"): return
     db.add_user(message.from_user.id, message.from_user.username)
-    if not await check_force_subscribe(client, message):
-        return
+    if not await check_force_subscribe(client, message): return
 
-    status_msg = await message.reply_text("🔗 **URL Detected... Added to Queue** ⏳")
+    status_msg = await message.reply_text("🔗 **Processing Link...**")
     await bot.download_queue.put(("url", message.text.strip(), message, status_msg))
     asyncio.create_task(process_queue())
 
 @bot.on_message((filters.document | filters.video | filters.audio | filters.photo) & filters.private)
-async def file_detector(client, message):
+async def file_handler(client, message):
     db.add_user(message.from_user.id, message.from_user.username)
-    if not await check_force_subscribe(client, message):
-        return
+    if not await check_force_subscribe(client, message): return
 
     media = message.document or message.video or message.audio or message.photo
-    status_msg = await message.reply_text("📁 **File Detected... Added to Queue** ⏳")
-    
+    status_msg = await message.reply_text("📁 **Processing File...**")
     await bot.download_queue.put(("file", media, message, status_msg))
     asyncio.create_task(process_queue())
 
-# ==============================================================================
-# CORE PROCESSING ENGINE
-# ==============================================================================
-
 async def process_queue():
     async with bot.processing_lock:
+        if bot.download_queue.empty(): return
+        task = await bot.download_queue.get()
+        type_, data, msg, status = task
+        
         try:
-            if bot.download_queue.empty():
-                return
-            
-            task = await bot.download_queue.get()
-            type_ = task[0]
-            
+            file_path = None
             if type_ == "file":
-                await process_tg_file(*task[1:])
+                file_name = getattr(data, "file_name", f"file_{msg.id}")
+                file_path = os.path.join(DOWNLOAD_DIR, file_name)
+                await status.edit_text("⬇️ **Downloading...**")
+                await bot.download_media(msg, file_path)
+                await upload_logic(client=bot, file_path=file_path, status_msg=status, message=msg, file_size=data.file_size, is_url=False, media_obj=data)
+            
             elif type_ == "url":
-                await process_url(*task[1:])
+                await status.edit_text("⬇️ **Downloading URL...**")
+                file_name = data.split("/")[-1].split("?")[0] or "download.bin"
+                file_path = os.path.join(DOWNLOAD_DIR, file_name)
                 
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(data) as resp:
+                        if resp.status != 200: return await status.edit_text("❌ Invalid URL")
+                        with open(file_path, "wb") as f:
+                            async for chunk in resp.content.iter_chunked(CHUNK_SIZE): f.write(chunk)
+                
+                await upload_logic(client=bot, file_path=file_path, status_msg=status, message=msg, file_size=os.path.getsize(file_path), is_url=True)
+
         except Exception as e:
-            logger.error(f"Queue Error: {e}")
-            await alert_admins(bot, f"Queue Processor Failed: {str(e)}\n{traceback.format_exc()}")
+            await status.edit_text("❌ **Error during process**")
+            await alert_admins(bot, str(e))
+        finally:
+            if file_path and os.path.exists(file_path): os.remove(file_path)
 
-async def process_tg_file(media, message, status_msg):
-    try:
-        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-        file_name = getattr(media, "file_name", f"file_{message.id}.{getattr(media, 'mime_type', 'bin').split('/')[-1]}")
-        file_path = os.path.join(DOWNLOAD_DIR, file_name)
-
-        await status_msg.edit_text("⬇️ **Downloading...**\n🚀 High Speed Stream")
-        
-        # Download
-        await bot.download_media(message, file_path)
-        
-        # Upload
-        await upload_to_gofile(file_path, status_msg, message, media.file_size, "Telegram File")
-
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Error: {e}")
-        await alert_admins(bot, f"TG Download Fail: {e}")
-    finally:
-        if os.path.exists(file_path): os.remove(file_path)
-
-async def process_url(url, message, status_msg):
-    file_path = None
-    try:
-        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-        await status_msg.edit_text("⬇️ **Downloading URL...**\n🚀 HTTP Stream")
-        
-        file_name = url.split("/")[-1].split("?")[0]
-        if not file_name: file_name = "url_download.bin"
-        file_path = os.path.join(DOWNLOAD_DIR, file_name)
-
-        connector = aiohttp.TCPConnector(limit=None, ttl_dns_cache=300)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            async with session.get(url) as response:
-                if response.status != 200:
-                    return await status_msg.edit_text("❌ **Invalid URL**")
-                
-                with open(file_path, "wb") as f:
-                    async for chunk in response.content.iter_chunked(CHUNK_SIZE):
-                        f.write(chunk)
-        
-        file_size = os.path.getsize(file_path)
-        await upload_to_gofile(file_path, status_msg, message, file_size, "HTTP URL")
-
-    except Exception as e:
-        await status_msg.edit_text(f"❌ URL Error: {e}")
-        await alert_admins(bot, f"URL Fail: {e}")
-    finally:
-        if file_path and os.path.exists(file_path): os.remove(file_path)
-
-# ==============================================================================
-# GOFILE UPLOAD ENGINE
-# ==============================================================================
-
-async def upload_to_gofile(path, status_msg, message, file_size, source_type):
-    servers = ["store1", "store2", "store3", "store4", "store5"] # Fallback if API fails
-    best_server = "store1" 
-    
+async def upload_logic(client, file_path, status_msg, message, file_size, is_url, media_obj=None):
     try:
         await status_msg.edit_text("⬆️ **Uploading to GoFile...**")
         
-        # Get Best Server
+        # GoFile Upload
+        server = "store1"
         async with aiohttp.ClientSession() as session:
-            async with session.get("https://api.gofile.io/getServer") as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data['status'] == 'ok':
-                        best_server = data['data']['server']
-
-        upload_url = f"https://{best_server}.gofile.io/uploadfile"
+            async with session.get("https://api.gofile.io/getServer") as r:
+                if r.status == 200: server = (await r.json())['data']['server']
         
-        # Upload
+        upload_url = f"https://{server}.gofile.io/uploadfile"
         async with aiohttp.ClientSession() as session:
-            data = aiohttp.FormData()
-            data.add_field('file', open(path, 'rb'))
-            data.add_field('token', GOFILE_API_TOKEN)
+            form = aiohttp.FormData()
+            form.add_field('file', open(file_path, 'rb'))
+            form.add_field('token', GOFILE_API_TOKEN)
             
-            async with session.post(upload_url, data=data) as response:
+            async with session.post(upload_url, data=form) as response:
                 res = await response.json()
-                
                 if res['status'] == 'ok':
-                    download_link = res['data']['downloadPage']
+                    link = res['data']['downloadPage']
                     
-                    text = (
-                        f"✅ **Upload Completed!**\n\n"
-                        f"📂 **File:** `{os.path.basename(path)}`\n"
+                    # 1. Reply to User
+                    user_text = (
+                        f"✅ **Upload Successful!**\n\n"
+                        f"📂 **File:** `{os.path.basename(file_path)}`\n"
                         f"📦 **Size:** `{human_readable_size(file_size)}`\n"
-                        f"📥 **Source:** {source_type}\n\n"
-                        f"🔗 **Link:** {download_link}"
+                        f"🔗 **Link:** {link}\n\n"
+                        f"⚡ Powered by @TOOLS_BOTS_KING"
                     )
+                    await status_msg.edit_text(user_text, disable_web_page_preview=True)
                     
-                    await status_msg.edit_text(text, disable_web_page_preview=True)
-                    
-                    # Log to Channel
+                    # 2. Log to Channel (Robust & Silent)
                     if LOG_CHANNEL_ID:
-                        user = message.from_user
-                        log_txt = (
-                            f"#NEW_UPLOAD\n"
-                            f"👤 User: {user.first_name} (`{user.id}`)\n"
-                            f"📂 File: {os.path.basename(path)}\n"
-                            f"🔗 Link: {download_link}"
-                        )
-                        await bot.send_message(LOG_CHANNEL_ID, log_txt)
-                else:
-                    await status_msg.edit_text("❌ **GoFile API Error**")
+                        file_type = "url" if is_url else (media_obj.mime_type if hasattr(media_obj, 'mime_type') else "unknown")
+                        log_caption = get_detailed_log(message.from_user, file_type, file_size, link)
+                        
+                        try:
+                            if not is_url:
+                                # Forward original file + Caption
+                                await message.copy(
+                                    chat_id=LOG_CHANNEL_ID, 
+                                    caption=log_caption
+                                )
+                            else:
+                                # Upload downloaded file + Caption
+                                await client.send_document(
+                                    chat_id=LOG_CHANNEL_ID,
+                                    document=file_path,
+                                    caption=log_caption
+                                )
+                        except Exception as e:
+                            # Fallback if file upload fails (e.g. too big for bot API limit)
+                            await client.send_message(LOG_CHANNEL_ID, log_caption)
+                            logger.error(f"Log Channel Upload Error: {e}")
 
+                else:
+                    await status_msg.edit_text("❌ **GoFile Error**")
     except Exception as e:
-        logger.error(f"Upload Fail: {e}")
-        await status_msg.edit_text(f"❌ Upload Failed: {e}")
+        logger.error(f"Upload Logic Error: {e}")
+        await status_msg.edit_text("❌ **Failed to Upload**")
 
 # ==============================================================================
-# WEB SERVER (For Render/Health Checks)
+# WEB SERVER
 # ==============================================================================
 
 from aiohttp import web
-
-async def web_handle(request):
-    return web.Response(text="Bot is Running | Management System Online")
-
-async def start_web_server():
+async def web_handle(r): return web.Response(text="Bot Running | @TOOLS_BOTS_KING")
+async def start_web():
     app = web.Application()
     app.router.add_get("/", web_handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    await web.TCPSite(runner, "0.0.0.0", port).start()
-
-# ==============================================================================
-# ENTRY POINT
-# ==============================================================================
+    await web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 8080))).start()
 
 async def main():
-    if not os.path.exists(DOWNLOAD_DIR):
-        os.makedirs(DOWNLOAD_DIR)
-        
-    # Start Web Server
-    await start_web_server()
-    
-    # Start Bot
-    print("🚀 Starting Bot with Advanced Management...")
+    if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
+    await start_web()
+    print("🚀 Bot Started | @TOOLS_BOTS_KING")
     await bot.start()
-    print("✅ Bot is Online")
-    
-    # Keep alive
     from pyrogram import idle
     await idle()
     await bot.stop()
