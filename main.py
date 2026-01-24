@@ -11,9 +11,9 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 from enum import Enum
 import aiohttp
-from pyrofork import Client, filters, idle
-from pyrofork.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrofork.errors import UserNotParticipant, ChannelPrivate, FloodWait
+from pyrogram import Client, filters, idle
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.errors import UserNotParticipant, ChannelPrivate, FloodWait
 from aiohttp import web
 import requests
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
