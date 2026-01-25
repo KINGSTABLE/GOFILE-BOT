@@ -1134,7 +1134,8 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
             f"📄 **File:** `{file_name}`\n"
             f"📦 **Size:** `{human_readable_size(file_size)}`\n"
             f"📥 **Source:** {source}\n\n"
-            f"🔗 **Download Link:**\n{link}"
+            f"🔗 **Download Link:**\n{link}\n\n"
+            f"🔹**Powered By : @TOOLS_BOTS_KING **🔸"
         )
         
         buttons = [
@@ -1246,3 +1247,4 @@ if __name__ == "__main__":
     loop = asyncio.get_event_loop()
 
     loop.run_until_complete(main())
+
