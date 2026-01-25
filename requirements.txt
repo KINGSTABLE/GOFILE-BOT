@@ -10,4 +10,4 @@ opencv-python-headless
 uvloop
 flask
 dnspython
-
+aiofiles==23.2.1
