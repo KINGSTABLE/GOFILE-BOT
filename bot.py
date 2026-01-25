@@ -173,7 +173,7 @@ async def start(client: Client, message: Message):
         f"👋 **Welcome, {user.first_name}!**\n\n"
         f"⚡ **High-Performance GoFile Uploader**\n\n"
         f"🚀 **Features:**\n"
-        f"├ 📁 Upload Files (up to 50GB)\n"
+        f"├ 📁 Upload Files (up to 4GB)\n"
         f"├ 🔗 Upload from URLs\n"
         f"├ ⚡ Ultra-fast processing\n"
         f"└ 📊 Track your uploads\n\n"
@@ -243,7 +243,7 @@ async def help_command(client: Client, message: Message):
         "3️⃣ Wait for processing\n"
         "4️⃣ Get your GoFile link!\n\n"
         "**Supported:**\n"
-        "📁 Files up to 50GB\n"
+        "📁 Files up to 4GB\n"
         "🔗 Direct HTTP/HTTPS URLs"
     )
     
@@ -269,7 +269,7 @@ async def help_menu_callback(client: Client, callback: CallbackQuery):
         "3️⃣ Wait for processing\n"
         "4️⃣ Get your GoFile link!\n\n"
         "**Supported:**\n"
-        "📁 Files up to 50GB\n"
+        "📁 Files up to 4GB\n"
         "🔗 Direct HTTP/HTTPS URLs"
     )
     
@@ -285,7 +285,7 @@ async def go_start_callback(client: Client, callback: CallbackQuery):
         f"👋 **Welcome, {user.first_name}!**\n\n"
         f"⚡ **High-Performance GoFile Uploader**\n\n"
         f"🚀 **Features:**\n"
-        f"├ 📁 Upload Files (up to 50GB)\n"
+        f"├ 📁 Upload Files (up to 4GB)\n"
         f"├ 🔗 Upload from URLs\n"
         f"├ ⚡ Ultra-fast processing\n"
         f"└ 📊 Track your uploads\n\n"
@@ -386,7 +386,7 @@ async def about_command(client: Client, message: Message):
         f"👥 **Total Users:** {bot_stats['total_users']}\n"
         f"📤 **Total Uploads:** {bot_stats['total_uploads']}\n"
         f"💾 **Data Processed:** {human_readable_size(bot_stats['total_size'])}\n\n"
-        "🔧 **Developer:** @YourUsername\n"
+        "🔧 **Developer:** @TG_Bot_Support_bot\n"
         "📅 **Version:** 2.0.0"
     )
     
@@ -1244,4 +1244,5 @@ async def main():
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
+
     loop.run_until_complete(main())
