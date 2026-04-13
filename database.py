@@ -187,7 +187,8 @@ class Database:
 
         old_file = self.data["bot_stats"].get("username_export_file")
         safe_old_file = os.path.basename(old_file) if old_file else ""
-        if safe_old_file and safe_old_file == old_file and safe_old_file != filename:
+        old_file_is_safe = bool(old_file) and (safe_old_file == old_file)
+        if old_file_is_safe and safe_old_file != filename:
             old_path = os.path.join(db_dir, safe_old_file)
             if os.path.exists(old_path):
                 try:

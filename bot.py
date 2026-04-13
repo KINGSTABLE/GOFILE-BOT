@@ -238,8 +238,8 @@ async def command_analytics_tracker(client: Client, message: Message):
                 "command",
                 chat_id=chat_id,
                 metadata={
-                    "command_name": (message.command[0] if message.command else ""),
-                    "args_count": (len(message.command) - 1 if message.command else 0)
+                    "command_name": ((getattr(message, "command", None) or [""])[0]),
+                    "args_count": max(0, len(getattr(message, "command", None) or []) - 1)
                 }
             )
         except Exception as e:
