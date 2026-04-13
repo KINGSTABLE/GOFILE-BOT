@@ -70,6 +70,46 @@ def get_current_time():
 async def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS or user_id == OWNER_ID
 
+async def build_start_text_and_keyboard(user):
+    custom_welcome = await db.get_welcome_message()
+    ads = await db.get_ads()
+
+    welcome_text = custom_welcome if custom_welcome else (
+        f"👋 **Welcome, {user.first_name}!**\n\n"
+        f"⚡ **High-Performance GoFile Uploader**\n\n"
+        f"🚀 **Features:**\n"
+        f"├ 📁 Upload Files (Unlimited Requests)\n"
+        f"├ 🔗 Upload from URLs\n"
+        f"├ ⚡ Ultra-fast processing\n"
+        f"└ 📊 Track your uploads\n\n"
+        f"📤 **Send me a file or URL to get started!**"
+    )
+
+    buttons = []
+    if SUPPORT_CHAT:
+        buttons.append([
+            InlineKeyboardButton("💬 Support", url=f"https://t.me/{SUPPORT_CHAT}"),
+            InlineKeyboardButton("📢 Updates", url=f"https://t.me/{UPDATE_CHANNEL}" if UPDATE_CHANNEL else f"https://t.me/{SUPPORT_CHAT}")
+        ])
+
+    buttons.append([
+        InlineKeyboardButton("📊 My Stats", callback_data="my_stats"),
+        InlineKeyboardButton("ℹ️ Help", callback_data="help_menu")
+    ])
+
+    if await is_admin(user.id):
+        buttons.append([
+            InlineKeyboardButton("👑 Admin Panel", callback_data="admin_panel"),
+            InlineKeyboardButton("🧭 Admin Guide", callback_data="admin_guide")
+        ])
+
+    if ads["enabled"] and ads["message"]:
+        welcome_text += f"\n\n📢 **Sponsored:**\n{ads['message']}"
+        if ads["button_text"] and ads["button_url"]:
+            buttons.insert(0, [InlineKeyboardButton(ads["button_text"], url=ads["button_url"])])
+
+    return welcome_text, InlineKeyboardMarkup(buttons)
+
 # ================== FORCE SUBSCRIBE MIDDLEWARE ==================
 
 async def force_sub_check(client: Client, message: Message) -> bool:
@@ -77,43 +117,48 @@ async def force_sub_check(client: Client, message: Message) -> bool:
     Check force subscribe status
     Returns True if user can proceed, False otherwise
     """
-    user_id = message.from_user.id
-    
-    # Skip check for admins
-    if await is_admin(user_id):
+    try:
+        user_id = message.from_user.id
+
+        # Skip check for admins
+        if await is_admin(user_id):
+            return True
+
+        await db.track_activity(user_id, event_type="activity")
+
+        # Check if banned
+        if await db.is_banned(user_id):
+            await message.reply_text(
+                "🚫 **You are BANNED from using this bot!**\n\n"
+                "Contact support if you think this is a mistake."
+            )
+            return False
+
+        # Check maintenance mode
+        if await db.is_maintenance():
+            await message.reply_text(
+                "🔧 **Bot Under Maintenance!**\n\n"
+                "Please try again later. We're improving things!"
+            )
+            return False
+
+        # Check force subscribe
+        is_subscribed, missing_channels = await check_force_sub(client, user_id)
+
+        if not is_subscribed:
+            invite_links = await get_invite_links(client, missing_channels)
+            keyboard = get_fsub_keyboard(missing_channels, invite_links)
+            await message.reply_text(
+                f"{get_random_left_message()}\n\n{get_fsub_message(len(missing_channels))}",
+                reply_markup=keyboard
+            )
+            return False
+
         return True
-    
-    # Check if banned
-    if await db.is_banned(user_id):
-        await message.reply_text(
-            "🚫 **You are BANNED from using this bot!**\n\n"
-            "Contact support if you think this is a mistake."
-        )
+    except Exception as e:
+        logger.error(f"force_sub_check failed for user {message.from_user.id}: {e}")
+        await message.reply_text("❌ Could not verify channel membership right now. Please try again in a moment.")
         return False
-    
-    # Check maintenance mode
-    if await db.is_maintenance() and not await is_admin(user_id):
-        await message.reply_text(
-            "🔧 **Bot Under Maintenance!**\n\n"
-            "Please try again later. We're improving things!"
-        )
-        return False
-    
-    # Check force subscribe
-    is_subscribed, missing_channels = await check_force_sub(client, user_id)
-    
-    if not is_subscribed:
-        invite_links = await get_invite_links(client, missing_channels)
-        keyboard = get_fsub_keyboard(missing_channels, invite_links)
-        fsub_msg = get_fsub_message(len(missing_channels))
-        
-        await message.reply_text(
-            fsub_msg,
-            reply_markup=keyboard
-        )
-        return False
-    
-    return True
 
 # ================== CALLBACK HANDLER FOR FSUB ==================
 
@@ -121,6 +166,10 @@ async def force_sub_check(client: Client, message: Message) -> bool:
 async def check_fsub_callback(client: Client, callback: CallbackQuery):
     """Handle force subscribe verification"""
     user_id = callback.from_user.id
+
+    if await is_admin(user_id):
+        await callback.answer("✅ Admin bypass active.", show_alert=True)
+        return
     
     is_subscribed, missing_channels = await check_force_sub(client, user_id)
     
@@ -146,6 +195,14 @@ async def check_fsub_callback(client: Client, callback: CallbackQuery):
             reply_markup=keyboard
         )
 
+@app.on_message(filters.private & filters.regex(r"^/"), group=0)
+async def command_analytics_tracker(client: Client, message: Message):
+    if message.from_user and not await is_admin(message.from_user.id):
+        try:
+            await db.track_activity(message.from_user.id, event_type="command")
+        except Exception as e:
+            logger.error(f"Command analytics tracking failed: {e}")
+
 # ================== START COMMAND ==================
 
 @app.on_message(filters.command("start") & filters.private)
@@ -162,53 +219,7 @@ async def start(client: Client, message: Message):
     if not await force_sub_check(client, message):
         return
     
-    # Get custom welcome message or use default
-    custom_welcome = await db.get_welcome_message()
-    
-    # Get ads
-    ads = await db.get_ads()
-    
-    # Default welcome message
-    welcome_text = custom_welcome if custom_welcome else (
-        f"👋 **Welcome, {user.first_name}!**\n\n"
-        f"⚡ **High-Performance GoFile Uploader**\n\n"
-        f"🚀 **Features:**\n"
-        f"├ 📁 Upload Files (up to 4GB)\n"
-        f"├ 🔗 Upload from URLs\n"
-        f"├ ⚡ Ultra-fast processing\n"
-        f"└ 📊 Track your uploads\n\n"
-        f"📤 **Send me a file or URL to get started!**"
-    )
-    
-    # Build keyboard
-    buttons = []
-    
-    if SUPPORT_CHAT:
-        buttons.append([
-            InlineKeyboardButton("💬 Support", url=f"https://t.me/{SUPPORT_CHAT}"),
-            InlineKeyboardButton("📢 Updates", url=f"https://t.me/{UPDATE_CHANNEL}" if UPDATE_CHANNEL else f"https://t.me/{SUPPORT_CHAT}")
-        ])
-    
-    buttons.append([
-        InlineKeyboardButton("📊 My Stats", callback_data="my_stats"),
-        InlineKeyboardButton("ℹ️ Help", callback_data="help_menu")
-    ])
-    
-    if await is_admin(user.id):
-        buttons.append([
-            InlineKeyboardButton("👑 Admin Panel", callback_data="admin_panel")
-        ])
-    
-    keyboard = InlineKeyboardMarkup(buttons)
-    
-    # Add ads if enabled
-    if ads["enabled"] and ads["message"]:
-        welcome_text += f"\n\n📢 **Sponsored:**\n{ads['message']}"
-        if ads["button_text"] and ads["button_url"]:
-            buttons.insert(0, [
-                InlineKeyboardButton(ads["button_text"], url=ads["button_url"])
-            ])
-            keyboard = InlineKeyboardMarkup(buttons)
+    welcome_text, keyboard = await build_start_text_and_keyboard(user)
     
     if START_IMG:
         await message.reply_photo(
@@ -255,6 +266,16 @@ async def help_command(client: Client, message: Message):
 
 @app.on_callback_query(filters.regex("^help_menu$"))
 async def help_menu_callback(client: Client, callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        is_subscribed, missing_channels = await check_force_sub(client, callback.from_user.id)
+        if not is_subscribed:
+            invite_links = await get_invite_links(client, missing_channels)
+            await callback.message.edit_text(
+                get_fsub_message(len(missing_channels)),
+                reply_markup=get_fsub_keyboard(missing_channels, invite_links)
+            )
+            await callback.answer("Join required channels first.", show_alert=True)
+            return
     help_text = (
         "📖 **Help & Commands**\n\n"
         "**User Commands:**\n"
@@ -280,37 +301,19 @@ async def help_menu_callback(client: Client, callback: CallbackQuery):
 @app.on_callback_query(filters.regex("^go_start$"))
 async def go_start_callback(client: Client, callback: CallbackQuery):
     user = callback.from_user
-    
-    welcome_text = (
-        f"👋 **Welcome, {user.first_name}!**\n\n"
-        f"⚡ **High-Performance GoFile Uploader**\n\n"
-        f"🚀 **Features:**\n"
-        f"├ 📁 Upload Files (up to 4GB)\n"
-        f"├ 🔗 Upload from URLs\n"
-        f"├ ⚡ Ultra-fast processing\n"
-        f"└ 📊 Track your uploads\n\n"
-        f"📤 **Send me a file or URL to get started!**"
-    )
-    
-    buttons = []
-    
-    if SUPPORT_CHAT:
-        buttons.append([
-            InlineKeyboardButton("💬 Support", url=f"https://t.me/{SUPPORT_CHAT}"),
-            InlineKeyboardButton("📢 Updates", url=f"https://t.me/{UPDATE_CHANNEL}" if UPDATE_CHANNEL else f"https://t.me/{SUPPORT_CHAT}")
-        ])
-    
-    buttons.append([
-        InlineKeyboardButton("📊 My Stats", callback_data="my_stats"),
-        InlineKeyboardButton("ℹ️ Help", callback_data="help_menu")
-    ])
-    
-    if await is_admin(user.id):
-        buttons.append([
-            InlineKeyboardButton("👑 Admin Panel", callback_data="admin_panel")
-        ])
-    
-    await callback.message.edit_text(welcome_text, reply_markup=InlineKeyboardMarkup(buttons))
+    if not await is_admin(user.id):
+        is_subscribed, missing_channels = await check_force_sub(client, user.id)
+        if not is_subscribed:
+            invite_links = await get_invite_links(client, missing_channels)
+            await callback.message.edit_text(
+                get_fsub_message(len(missing_channels)),
+                reply_markup=get_fsub_keyboard(missing_channels, invite_links)
+            )
+            await callback.answer("Join required channels first.", show_alert=True)
+            return
+
+    welcome_text, keyboard = await build_start_text_and_keyboard(user)
+    await callback.message.edit_text(welcome_text, reply_markup=keyboard)
 
 # ================== USER STATS ==================
 
@@ -340,6 +343,17 @@ async def user_stats_command(client: Client, message: Message):
 
 @app.on_callback_query(filters.regex("^my_stats$"))
 async def my_stats_callback(client: Client, callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        is_subscribed, missing_channels = await check_force_sub(client, callback.from_user.id)
+        if not is_subscribed:
+            invite_links = await get_invite_links(client, missing_channels)
+            await callback.message.edit_text(
+                get_fsub_message(len(missing_channels)),
+                reply_markup=get_fsub_keyboard(missing_channels, invite_links)
+            )
+            await callback.answer("Join required channels first.", show_alert=True)
+            return
+
     user_id = callback.from_user.id
     user_data = await db.get_user(user_id)
     
@@ -365,6 +379,8 @@ async def my_stats_callback(client: Client, callback: CallbackQuery):
 
 @app.on_message(filters.command("ping") & filters.private)
 async def ping_command(client: Client, message: Message):
+    if not await force_sub_check(client, message):
+        return
     start_time = time.time()
     msg = await message.reply_text("🏓 Pinging...")
     latency = (time.time() - start_time) * 1000
@@ -421,10 +437,37 @@ async def admin_panel_callback(client: Client, callback: CallbackQuery):
             InlineKeyboardButton("🔧 Settings", callback_data="admin_settings"),
             InlineKeyboardButton("📊 Stats", callback_data="admin_stats_detail")
         ],
+        [InlineKeyboardButton("📈 Analytics", callback_data="admin_analytics")],
+        [InlineKeyboardButton("🧭 Admin Guide", callback_data="admin_guide")],
         [InlineKeyboardButton("🔙 Back", callback_data="go_start")]
     ]
     
     await callback.message.edit_text(admin_text, reply_markup=InlineKeyboardMarkup(buttons))
+
+@app.on_callback_query(filters.regex("^admin_guide$"))
+@admin_only
+async def admin_guide_callback(client: Client, callback: CallbackQuery):
+    text = (
+        "🧭 **Admin Guidance**\n\n"
+        "**User & Access:**\n"
+        "• `/users` - User counts and moderation shortcuts\n"
+        "• `/ban <id>` / `/unban <id>` - Manage abuse\n"
+        "• `/user <id>` - Inspect user profile\n\n"
+        "**Force Subscribe:**\n"
+        "• `/fsub` - View channels\n"
+        "• `/addfsub <id> [link]` - Add a channel\n"
+        "• `/remfsub <id>` - Remove a channel\n"
+        "• Required channels are always enforced for non-admins\n\n"
+        "**Broadcast & Ads:**\n"
+        "• `/broadcast` (+ `-f`, `-p`) - Message all users\n"
+        "• `/setad` / `/togglead` / `/delad` - Sponsor controls\n\n"
+        "**Ops & Analytics:**\n"
+        "• `/maintenance on|off` - Maintenance mode\n"
+        "• `/setwelcome` / `/resetwelcome` - Welcome text\n"
+        "• `/analytics` - Daily/weekly/monthly/yearly usage panel"
+    )
+    buttons = [[InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]]
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 # ================== ADMIN COMMANDS ==================
 
@@ -703,7 +746,7 @@ async def fsub_list_command(client: Client, message: Message):
     buttons = [
         [
             InlineKeyboardButton(
-                "🔴 Disable" if is_enabled else "🟢 Enable",
+                "🔒 FSub Locked ON",
                 callback_data="toggle_fsub"
             )
         ]
@@ -735,7 +778,7 @@ async def admin_fsub_callback(client: Client, callback: CallbackQuery):
     buttons = [
         [
             InlineKeyboardButton(
-                "🔴 Disable FSub" if is_enabled else "🟢 Enable FSub",
+                "🔒 FSub Locked ON",
                 callback_data="toggle_fsub"
             )
         ],
@@ -747,13 +790,8 @@ async def admin_fsub_callback(client: Client, callback: CallbackQuery):
 @app.on_callback_query(filters.regex("^toggle_fsub$"))
 @admin_only
 async def toggle_fsub_callback(client: Client, callback: CallbackQuery):
-    current = await db.is_fsub_enabled()
-    await db.toggle_fsub(not current)
-    
-    status = "🟢 Enabled" if not current else "🔴 Disabled"
-    await callback.answer(f"FSub {status}!", show_alert=True)
-    
-    # Refresh the panel
+    await db.toggle_fsub(True)
+    await callback.answer("Required channel subscription is locked ON for production safety.", show_alert=True)
     await admin_fsub_callback(client, callback)
 
 # ----- ADS MANAGEMENT -----
@@ -942,11 +980,51 @@ async def admin_stats_detail_callback(client: Client, callback: CallbackQuery):
         f"👥 **Total Users:** {stats['total_users']}\n"
         f"🚫 **Banned Users:** {stats['banned_users']}\n"
         f"📢 **FSub Channels:** {stats['fsub_channels']}\n"
+        f"🔐 **Required Channels:** {', '.join(str(x) for x in REQUIRED_FSUB_CHANNELS)}\n"
         f"📤 **Total Uploads:** {stats['total_uploads']}\n"
         f"💾 **Total Data:** {human_readable_size(stats['total_size'])}\n"
-        f"📅 **Bot Started:** {stats['start_time'][:10]}"
+        f"📅 **Bot Started:** {stats['start_time'][:10]}\n\n"
+        "📈 Use **Analytics** panel for daily/weekly/monthly/yearly trends."
     )
     
+    buttons = [[InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]]
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+def format_analytics_block(title: str, data: dict) -> str:
+    return (
+        f"**{title}**\n"
+        f"• Active Users: {data.get('active_users', 0)}\n"
+        f"• New Users: {data.get('new_users', 0)}\n"
+        f"• Uploads: {data.get('uploads', 0)}\n"
+        f"• Data Uploaded: {human_readable_size(data.get('uploaded_size', 0))}\n"
+        f"• Commands Used: {data.get('commands', 0)}\n"
+    )
+
+@app.on_message(filters.command("analytics") & filters.private)
+@admin_only
+async def analytics_command(client: Client, message: Message):
+    analytics = await db.get_analytics_summary()
+    text = (
+        "📈 **Admin Analytics Panel**\n\n"
+        f"{format_analytics_block('Today (DAU)', analytics['daily'])}\n"
+        f"{format_analytics_block('Last 7 Days (WAU)', analytics['weekly'])}\n"
+        f"{format_analytics_block('Last 30 Days (MAU)', analytics['monthly'])}\n"
+        f"{format_analytics_block('Last 365 Days (YAU)', analytics['yearly'])}"
+    )
+    await message.reply_text(text)
+
+@app.on_callback_query(filters.regex("^admin_analytics$"))
+@admin_only
+async def admin_analytics_callback(client: Client, callback: CallbackQuery):
+    analytics = await db.get_analytics_summary()
+    text = (
+        "📈 **Admin Analytics Panel**\n\n"
+        f"{format_analytics_block('Today (DAU)', analytics['daily'])}\n"
+        f"{format_analytics_block('Last 7 Days (WAU)', analytics['weekly'])}\n"
+        f"{format_analytics_block('Last 30 Days (MAU)', analytics['monthly'])}\n"
+        f"{format_analytics_block('Last 365 Days (YAU)', analytics['yearly'])}\n"
+        "Use `/analytics` anytime for a fresh report."
+    )
     buttons = [[InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]]
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -981,7 +1059,7 @@ async def immediate_backup(client, message, is_url=False, url_text=None):
 
 # ================== URL HANDLING ==================
 
-@app.on_message(filters.text & filters.private & ~filters.command(["start", "help", "stats", "ping", "about", "broadcast", "users", "ban", "unban", "banned", "user", "addfsub", "remfsub", "fsub", "setad", "delad", "togglead", "maintenance", "setwelcome", "resetwelcome", "export"]))
+@app.on_message(filters.text & filters.private & ~filters.command(["start", "help", "stats", "ping", "about", "analytics", "broadcast", "users", "ban", "unban", "banned", "user", "addfsub", "remfsub", "fsub", "setad", "delad", "togglead", "maintenance", "setwelcome", "resetwelcome", "export"]))
 async def url_handler(client: Client, message: Message):
     text = message.text.strip()
     
@@ -1235,6 +1313,8 @@ async def start_web():
 
 async def main():
     print("🤖 Bot Starting with uvloop optimization...")
+    await db.ensure_required_fsub_channels()
+    await db.toggle_fsub(True)
     await app.start()
     print("✅ Bot Connected to Telegram")
     print("🌍 Starting Web Server...")

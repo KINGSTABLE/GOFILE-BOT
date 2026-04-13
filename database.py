@@ -2,8 +2,8 @@
 import json
 import os
 import asyncio
-from datetime import datetime
-from config import DATABASE_FILE
+from datetime import datetime, timedelta
+from config import DATABASE_FILE, REQUIRED_FSUB_CHANNELS
 
 class Database:
     def __init__(self):
@@ -32,6 +32,9 @@ class Database:
                 "fsub_enabled": True,
                 "maintenance_mode": False,
                 "welcome_message": ""
+            },
+            "analytics": {
+                "daily": {}
             }
         }
         
@@ -43,6 +46,8 @@ class Database:
                     for key in default_data:
                         if key not in loaded:
                             loaded[key] = default_data[key]
+                    if "daily" not in loaded.get("analytics", {}):
+                        loaded["analytics"]["daily"] = {}
                     return loaded
             except:
                 return default_data
@@ -59,21 +64,25 @@ class Database:
     async def add_user(self, user_id: int, user_info: dict):
         """Add or update user"""
         user_id = str(user_id)
+        now_iso = datetime.now().isoformat()
+        is_new_user = user_id not in self.data["users"]
+
         if user_id not in self.data["users"]:
             self.data["users"][user_id] = {
                 "user_id": int(user_id),
                 "first_name": user_info.get("first_name", ""),
                 "username": user_info.get("username", ""),
-                "joined_date": datetime.now().isoformat(),
-                "last_active": datetime.now().isoformat(),
+                "joined_date": now_iso,
+                "last_active": now_iso,
                 "uploads_count": 0,
                 "total_size": 0
             }
         else:
-            self.data["users"][user_id]["last_active"] = datetime.now().isoformat()
+            self.data["users"][user_id]["last_active"] = now_iso
             self.data["users"][user_id]["first_name"] = user_info.get("first_name", "")
             self.data["users"][user_id]["username"] = user_info.get("username", "")
-        
+
+        await self.track_activity(int(user_id), event_type="activity", is_new_user=is_new_user, persist=False)
         await self._save_db()
     
     async def get_user(self, user_id: int):
@@ -94,9 +103,11 @@ class Database:
         if user_id in self.data["users"]:
             self.data["users"][user_id]["uploads_count"] += 1
             self.data["users"][user_id]["total_size"] += file_size
+            self.data["users"][user_id]["last_active"] = datetime.now().isoformat()
         
         self.data["bot_stats"]["total_uploads"] += 1
         self.data["bot_stats"]["total_size_uploaded"] += file_size
+        await self.track_activity(int(user_id), event_type="upload", upload_size=file_size, persist=False)
         await self._save_db()
     
     # ================== BAN MANAGEMENT ==================
@@ -162,6 +173,24 @@ class Database:
         """Enable/Disable force subscribe"""
         self.data["settings"]["fsub_enabled"] = enabled
         await self._save_db()
+
+    async def ensure_required_fsub_channels(self):
+        """Ensure required force-subscribe channels exist"""
+        existing_ids = {ch.get("id") for ch in self.data["fsub_channels"]}
+        changed = False
+
+        for channel_id in REQUIRED_FSUB_CHANNELS:
+            if channel_id not in existing_ids:
+                self.data["fsub_channels"].append({
+                    "id": channel_id,
+                    "name": f"Required Channel {channel_id}",
+                    "link": "",
+                    "added_date": datetime.now().isoformat()
+                })
+                changed = True
+
+        if changed:
+            await self._save_db()
     
     # ================== ADS MANAGEMENT ==================
     
@@ -215,6 +244,72 @@ class Database:
             "total_uploads": self.data["bot_stats"]["total_uploads"],
             "total_size": self.data["bot_stats"]["total_size_uploaded"],
             "start_time": self.data["bot_stats"]["start_time"]
+        }
+
+    # ================== ANALYTICS ==================
+
+    async def track_activity(self, user_id: int, event_type: str = "activity", upload_size: int = 0, is_new_user: bool = False, persist: bool = True):
+        """Track daily usage analytics"""
+        date_key = datetime.now().strftime("%Y-%m-%d")
+        daily = self.data["analytics"].setdefault("daily", {})
+        day_data = daily.setdefault(date_key, {
+            "active_users": [],
+            "new_users": 0,
+            "uploads": 0,
+            "uploaded_size": 0,
+            "commands": 0
+        })
+
+        if user_id not in day_data["active_users"]:
+            day_data["active_users"].append(user_id)
+
+        if is_new_user:
+            day_data["new_users"] += 1
+
+        if event_type == "upload":
+            day_data["uploads"] += 1
+            day_data["uploaded_size"] += max(0, int(upload_size))
+        elif event_type == "command":
+            day_data["commands"] += 1
+
+        if persist:
+            await self._save_db()
+
+    def _sum_period(self, days: int):
+        today = datetime.now().date()
+        daily = self.data.get("analytics", {}).get("daily", {})
+        result = {
+            "active_users": set(),
+            "new_users": 0,
+            "uploads": 0,
+            "uploaded_size": 0,
+            "commands": 0,
+            "days_with_data": 0
+        }
+
+        for i in range(days):
+            d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+            data = daily.get(d)
+            if not data:
+                continue
+
+            result["days_with_data"] += 1
+            result["active_users"].update(data.get("active_users", []))
+            result["new_users"] += int(data.get("new_users", 0))
+            result["uploads"] += int(data.get("uploads", 0))
+            result["uploaded_size"] += int(data.get("uploaded_size", 0))
+            result["commands"] += int(data.get("commands", 0))
+
+        result["active_users"] = len(result["active_users"])
+        return result
+
+    async def get_analytics_summary(self):
+        """Get DAU/WAU/MAU/YAU style analytics summary"""
+        return {
+            "daily": self._sum_period(1),
+            "weekly": self._sum_period(7),
+            "monthly": self._sum_period(30),
+            "yearly": self._sum_period(365)
         }
 
 # Global database instance
