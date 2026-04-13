@@ -3,36 +3,57 @@ from pyrogram import Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import UserNotParticipant, ChatAdminRequired, PeerIdInvalid
 from database import db
+from config import REQUIRED_FSUB_CHANNELS, SUPPORT_CHAT
 import logging
 
 logger = logging.getLogger(__name__)
 
+def get_channel_candidates(channel_id: int) -> list:
+    """Try useful channel-id variants for compatibility."""
+    candidates = [channel_id]
+    if channel_id > 0:
+        candidates.append(int(f"-100{channel_id}"))
+    if channel_id < -1000000000000:
+        trimmed = str(abs(channel_id))[3:]
+        if trimmed.isdigit():
+            candidates.append(int(trimmed))
+    return list(dict.fromkeys(candidates))
+
 async def check_subscription(client: Client, user_id: int, channel_id: int) -> bool:
     """Check if user is subscribed to a channel"""
-    try:
-        member = await client.get_chat_member(channel_id, user_id)
-        return member.status not in ["left", "kicked", "banned"]
-    except UserNotParticipant:
-        return False
-    except ChatAdminRequired:
-        logger.error(f"Bot is not admin in channel {channel_id}")
-        return True  # Allow if bot can't check
-    except PeerIdInvalid:
-        logger.error(f"Invalid channel ID: {channel_id}")
-        return True  # Allow if channel invalid
-    except Exception as e:
-        logger.error(f"FSub check error for channel {channel_id}: {e}")
-        return True  # Allow on error
+    for candidate in get_channel_candidates(channel_id):
+        try:
+            member = await client.get_chat_member(candidate, user_id)
+            if member.status in ["left", "kicked", "banned"]:
+                continue
+            return True
+        except UserNotParticipant:
+            continue
+        except ChatAdminRequired:
+            logger.error(f"Bot must be added as admin in channel {candidate} to enforce subscription requirements.")
+            return False
+        except PeerIdInvalid:
+            logger.warning(f"Invalid channel ID variant: {candidate}")
+            continue
+        except Exception as e:
+            logger.error(f"FSub check error for channel {candidate}: {e}")
+            continue
+    return False
 
 async def check_force_sub(client: Client, user_id: int) -> tuple:
     """
     Check if user is subscribed to all required channels
     Returns: (is_subscribed: bool, missing_channels: list)
     """
-    if not await db.is_fsub_enabled():
-        return True, []
-    
     channels = await db.get_fsub_channels()
+    mandatory = set(REQUIRED_FSUB_CHANNELS)
+    for channel_id in mandatory:
+        if not any(ch.get("id") == channel_id for ch in channels):
+            channels.append({
+                "id": channel_id,
+                "name": f"Required Channel {channel_id}",
+                "link": ""
+            })
     missing_channels = []
     
     for channel in channels:
@@ -58,23 +79,44 @@ async def get_invite_links(client: Client, channels: list) -> list:
             else:
                 # Try to get invite link
                 try:
-                    chat = await client.get_chat(channel["id"])
-                    if chat.invite_link:
-                        links.append({
-                            "name": chat.title or "Channel",
-                            "link": chat.invite_link
-                        })
+                    resolved = None
+                    for candidate in get_channel_candidates(channel["id"]):
+                        try:
+                            chat = await client.get_chat(candidate)
+                            if chat.invite_link:
+                                resolved = {
+                                    "name": chat.title or channel.get("name", "Channel"),
+                                    "link": chat.invite_link
+                                }
+                                break
+                            invite = await client.export_chat_invite_link(candidate)
+                            resolved = {
+                                "name": chat.title or channel.get("name", "Channel"),
+                                "link": invite
+                            }
+                            break
+                        except Exception:
+                            continue
+
+                    if resolved:
+                        links.append(resolved)
                     else:
-                        invite = await client.export_chat_invite_link(channel["id"])
-                        links.append({
-                            "name": chat.title or "Channel",
-                            "link": invite
-                        })
+                        raise ValueError("Could not resolve invite link from candidates")
                 except Exception as e:
                     logger.error(f"Could not get invite link for {channel['id']}: {e}")
+                    fallback_candidate = next((c for c in get_channel_candidates(channel["id"]) if c < 0), channel["id"])
+                    if fallback_candidate > 0:
+                        fallback_candidate = int(f"-100{fallback_candidate}")
+
+                    fallback_link = ""
+                    if str(abs(fallback_candidate)).startswith("100"):
+                        fallback_link = f"https://t.me/c/{str(abs(fallback_candidate))[3:]}"
+                    if not fallback_link and SUPPORT_CHAT:
+                        fallback_link = f"https://t.me/{SUPPORT_CHAT}"
+
                     links.append({
                         "name": channel.get("name", "Channel"),
-                        "link": f"https://t.me/c/{str(channel['id'])[4:]}"
+                        "link": fallback_link or "https://t.me/Telegram"
                     })
         except Exception as e:
             logger.error(f"Error getting invite link: {e}")
@@ -106,13 +148,13 @@ def get_fsub_keyboard(missing_channels: list, invite_links: list) -> InlineKeybo
 def get_fsub_message(missing_count: int) -> str:
     """Generate force subscribe message"""
     messages = [
-        "🚫 **Access Denied!**\n\n",
-        f"⚠️ You need to join **{missing_count}** channel(s) to use this bot!\n\n",
+        "🚫 **Access Blocked!**\n\n",
+        f"⚠️ You must join **{missing_count}** required channel(s) before using this bot.\n\n",
         "🔐 **Why Join?**\n",
         "• Get latest updates & features\n",
         "• Support our community\n",
         "• Unlock full bot access\n\n",
-        "👇 **Click buttons below to join:**"
+        "👇 **Join first, then tap verify:**"
     ]
     
     return "".join(messages)
