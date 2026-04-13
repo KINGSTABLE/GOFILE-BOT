@@ -747,7 +747,7 @@ async def fsub_list_command(client: Client, message: Message):
         [
             InlineKeyboardButton(
                 "🔒 FSub Locked ON",
-                callback_data="toggle_fsub"
+                callback_data="fsub_locked_info"
             )
         ]
     ]
@@ -779,7 +779,7 @@ async def admin_fsub_callback(client: Client, callback: CallbackQuery):
         [
             InlineKeyboardButton(
                 "🔒 FSub Locked ON",
-                callback_data="toggle_fsub"
+                callback_data="fsub_locked_info"
             )
         ],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]
@@ -787,11 +787,11 @@ async def admin_fsub_callback(client: Client, callback: CallbackQuery):
     
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
-@app.on_callback_query(filters.regex("^toggle_fsub$"))
+@app.on_callback_query(filters.regex("^fsub_locked_info$"))
 @admin_only
 async def toggle_fsub_callback(client: Client, callback: CallbackQuery):
     await db.toggle_fsub(True)
-    await callback.answer("Required channel subscription is locked ON for production safety.", show_alert=True)
+    await callback.answer("Channel subscription requirements cannot be disabled in this deployment.", show_alert=True)
     await admin_fsub_callback(client, callback)
 
 # ----- ADS MANAGEMENT -----
@@ -1314,7 +1314,6 @@ async def start_web():
 async def main():
     print("🤖 Bot Starting with uvloop optimization...")
     await db.ensure_required_fsub_channels()
-    await db.toggle_fsub(True)
     await app.start()
     print("✅ Bot Connected to Telegram")
     print("🌍 Starting Web Server...")

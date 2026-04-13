@@ -3,7 +3,7 @@ from pyrogram import Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import UserNotParticipant, ChatAdminRequired, PeerIdInvalid
 from database import db
-from config import REQUIRED_FSUB_CHANNELS
+from config import REQUIRED_FSUB_CHANNELS, SUPPORT_CHAT
 import logging
 
 logger = logging.getLogger(__name__)
@@ -24,11 +24,13 @@ async def check_subscription(client: Client, user_id: int, channel_id: int) -> b
     for candidate in get_channel_candidates(channel_id):
         try:
             member = await client.get_chat_member(candidate, user_id)
-            return member.status not in ["left", "kicked", "banned"]
+            if member.status in ["left", "kicked", "banned"]:
+                continue
+            return True
         except UserNotParticipant:
-            return False
+            continue
         except ChatAdminRequired:
-            logger.error(f"Bot is not admin in channel {candidate}; strict fsub is blocking access.")
+            logger.error(f"Bot must be added as admin in channel {candidate} to enforce subscription requirements.")
             return False
         except PeerIdInvalid:
             logger.warning(f"Invalid channel ID variant: {candidate}")
@@ -102,9 +104,19 @@ async def get_invite_links(client: Client, channels: list) -> list:
                         raise ValueError("Could not resolve invite link from candidates")
                 except Exception as e:
                     logger.error(f"Could not get invite link for {channel['id']}: {e}")
+                    fallback_candidate = next((c for c in get_channel_candidates(channel["id"]) if c < 0), channel["id"])
+                    if fallback_candidate > 0:
+                        fallback_candidate = int(f"-100{fallback_candidate}")
+
+                    fallback_link = ""
+                    if str(abs(fallback_candidate)).startswith("100"):
+                        fallback_link = f"https://t.me/c/{str(abs(fallback_candidate))[3:]}"
+                    if not fallback_link and SUPPORT_CHAT:
+                        fallback_link = f"https://t.me/{SUPPORT_CHAT}"
+
                     links.append({
                         "name": channel.get("name", "Channel"),
-                        "link": "https://t.me"
+                        "link": fallback_link or "https://t.me/Telegram"
                     })
         except Exception as e:
             logger.error(f"Error getting invite link: {e}")

@@ -4,6 +4,9 @@ import os
 import asyncio
 from datetime import datetime, timedelta
 from config import DATABASE_FILE, REQUIRED_FSUB_CHANNELS
+import logging
+
+logger = logging.getLogger(__name__)
 
 class Database:
     def __init__(self):
@@ -67,7 +70,7 @@ class Database:
         now_iso = datetime.now().isoformat()
         is_new_user = user_id not in self.data["users"]
 
-        if user_id not in self.data["users"]:
+        if is_new_user:
             self.data["users"][user_id] = {
                 "user_id": int(user_id),
                 "first_name": user_info.get("first_name", ""),
@@ -268,7 +271,16 @@ class Database:
 
         if event_type == "upload":
             day_data["uploads"] += 1
-            day_data["uploaded_size"] += max(0, int(upload_size))
+            try:
+                parsed_size = upload_size if isinstance(upload_size, int) else int(upload_size)
+            except (TypeError, ValueError):
+                logger.warning(f"Invalid upload size received for analytics: {upload_size}")
+                parsed_size = 0
+
+            if parsed_size < 0:
+                logger.warning(f"Negative upload size received for analytics: {parsed_size}")
+                parsed_size = 0
+            day_data["uploaded_size"] += parsed_size
         elif event_type == "command":
             day_data["commands"] += 1
 
@@ -276,6 +288,7 @@ class Database:
             await self._save_db()
 
     def _sum_period(self, days: int):
+        """Aggregate analytics data for the last `days` days."""
         today = datetime.now().date()
         daily = self.data.get("analytics", {}).get("daily", {})
         result = {
@@ -295,10 +308,10 @@ class Database:
 
             result["days_with_data"] += 1
             result["active_users"].update(data.get("active_users", []))
-            result["new_users"] += int(data.get("new_users", 0))
-            result["uploads"] += int(data.get("uploads", 0))
-            result["uploaded_size"] += int(data.get("uploaded_size", 0))
-            result["commands"] += int(data.get("commands", 0))
+            result["new_users"] += data.get("new_users", 0)
+            result["uploads"] += data.get("uploads", 0)
+            result["uploaded_size"] += data.get("uploaded_size", 0)
+            result["commands"] += data.get("commands", 0)
 
         result["active_users"] = len(result["active_users"])
         return result
