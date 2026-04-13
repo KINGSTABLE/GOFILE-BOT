@@ -7,6 +7,7 @@ import mimetypes
 import logging
 import uvloop
 import random
+from html import escape
 from datetime import datetime
 from pyrogram import Client, filters, idle
 from pyrogram.types import (
@@ -70,6 +71,24 @@ def get_current_time():
 async def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS or user_id == OWNER_ID
 
+def get_user_payload(message: Message) -> dict:
+    """Extract detailed Telegram user/chat payload."""
+    user = message.from_user
+    chat = message.chat
+    return {
+        "first_name": user.first_name or "",
+        "last_name": user.last_name or "",
+        "username": user.username or "",
+        "language_code": getattr(user, "language_code", "") or "",
+        "is_bot": bool(getattr(user, "is_bot", False)),
+        "is_premium": bool(getattr(user, "is_premium", False)),
+        "is_verified": bool(getattr(user, "is_verified", False)),
+        "is_scam": bool(getattr(user, "is_scam", False)),
+        "is_fake": bool(getattr(user, "is_fake", False)),
+        "chat_id": chat.id if chat else user.id,
+        "chat_type": chat.type if chat else "private",
+    }
+
 async def build_start_text_and_keyboard(user):
     custom_welcome = await db.get_welcome_message()
     ads = await db.get_ads()
@@ -119,12 +138,17 @@ async def force_sub_check(client: Client, message: Message) -> bool:
     """
     try:
         user_id = message.from_user.id
+        user_payload = get_user_payload(message)
+        chat_id = message.chat.id if message.chat else user_id
 
         # Skip check for admins
         if await is_admin(user_id):
+            await db.add_user(user_id, user_payload, chat_id=chat_id, source="admin_interaction")
+            await db.log_user_event(user_id, "admin_activity", chat_id=chat_id, metadata={"source": "force_sub_check"})
             return True
 
-        await db.track_activity(user_id, event_type="activity")
+        await db.add_user(user_id, user_payload, chat_id=chat_id, source="user_interaction", persist=False)
+        await db.log_user_event(user_id, "activity", chat_id=chat_id, metadata={"source": "force_sub_check"})
 
         # Check if banned
         if await db.is_banned(user_id):
@@ -197,9 +221,24 @@ async def check_fsub_callback(client: Client, callback: CallbackQuery):
 
 @app.on_message(filters.private & filters.regex(r"^/"), group=0)
 async def command_analytics_tracker(client: Client, message: Message):
-    if message.from_user and not await is_admin(message.from_user.id):
+    if message.from_user:
         try:
-            await db.track_activity(message.from_user.id, event_type="command")
+            user_payload = get_user_payload(message)
+            user_id = message.from_user.id
+            chat_id = message.chat.id if message.chat else user_id
+            await db.add_user(
+                user_id,
+                user_payload,
+                chat_id=chat_id,
+                source="command",
+                persist=False
+            )
+            await db.log_user_event(
+                user_id,
+                "command",
+                chat_id=chat_id,
+                metadata={"command": (message.command[0] if message.command else message.text)}
+            )
         except Exception as e:
             logger.error(f"Command analytics tracking failed: {e}")
 
@@ -208,12 +247,6 @@ async def command_analytics_tracker(client: Client, message: Message):
 @app.on_message(filters.command("start") & filters.private)
 async def start(client: Client, message: Message):
     user = message.from_user
-    
-    # Add user to database
-    await db.add_user(user.id, {
-        "first_name": user.first_name,
-        "username": user.username
-    })
     
     # Check force subscribe
     if not await force_sub_check(client, message):
@@ -464,7 +497,8 @@ async def admin_guide_callback(client: Client, callback: CallbackQuery):
         "**Ops & Analytics:**\n"
         "• `/maintenance on|off` - Maintenance mode\n"
         "• `/setwelcome` / `/resetwelcome` - Welcome text\n"
-        "• `/analytics` - Daily/weekly/monthly/yearly usage panel"
+        "• `/analytics` - Daily/weekly/monthly/yearly usage panel\n"
+        "• `/usernamefile` - Download latest username_{totalusername}.txt"
     )
     buttons = [[InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]]
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
@@ -1004,28 +1038,58 @@ def format_analytics_block(title: str, data: dict) -> str:
 @admin_only
 async def analytics_command(client: Client, message: Message):
     analytics = await db.get_analytics_summary()
-    text = (
-        "📈 **Admin Analytics Panel**\n\n"
-        f"{format_analytics_block('Today (DAU)', analytics['daily'])}\n"
-        f"{format_analytics_block('Last 7 Days (WAU)', analytics['weekly'])}\n"
-        f"{format_analytics_block('Last 30 Days (MAU)', analytics['monthly'])}\n"
-        f"{format_analytics_block('Last 365 Days (YAU)', analytics['yearly'])}"
-    )
-    await message.reply_text(text)
-
-@app.on_callback_query(filters.regex("^admin_analytics$"))
-@admin_only
-async def admin_analytics_callback(client: Client, callback: CallbackQuery):
-    analytics = await db.get_analytics_summary()
+    dashboard_url = ""
+    if WEB_BASE_URL and ADMIN_DASHBOARD_TOKEN:
+        dashboard_url = f"{WEB_BASE_URL}/admin/dashboard?token={ADMIN_DASHBOARD_TOKEN}"
     text = (
         "📈 **Admin Analytics Panel**\n\n"
         f"{format_analytics_block('Today (DAU)', analytics['daily'])}\n"
         f"{format_analytics_block('Last 7 Days (WAU)', analytics['weekly'])}\n"
         f"{format_analytics_block('Last 30 Days (MAU)', analytics['monthly'])}\n"
         f"{format_analytics_block('Last 365 Days (YAU)', analytics['yearly'])}\n"
-        "Use `/analytics` anytime for a fresh report."
+        f"{'🌐 Dashboard: ' + dashboard_url if dashboard_url else '⚠️ Set WEB_BASE_URL and ADMIN_DASHBOARD_TOKEN to enable web dashboard.'}"
     )
-    buttons = [[InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]]
+    buttons = []
+    if dashboard_url:
+        buttons.append([InlineKeyboardButton("🌐 Open Web Dashboard", url=dashboard_url)])
+    await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
+
+@app.on_message(filters.command("usernamefile") & filters.private)
+@admin_only
+async def username_export_file_command(client: Client, message: Message):
+    try:
+        file_path = await db.get_username_export_file_path()
+        if not file_path or not os.path.exists(file_path):
+            await message.reply_text("❌ Username export file is not available yet.")
+            return
+        await message.reply_document(
+            file_path,
+            caption="📄 Latest username export snapshot"
+        )
+    except Exception as e:
+        logger.error(f"Failed to send username export file: {e}")
+        await message.reply_text("❌ Failed to fetch username export file right now.")
+
+@app.on_callback_query(filters.regex("^admin_analytics$"))
+@admin_only
+async def admin_analytics_callback(client: Client, callback: CallbackQuery):
+    analytics = await db.get_analytics_summary()
+    dashboard_url = ""
+    if WEB_BASE_URL and ADMIN_DASHBOARD_TOKEN:
+        dashboard_url = f"{WEB_BASE_URL}/admin/dashboard?token={ADMIN_DASHBOARD_TOKEN}"
+    text = (
+        "📈 **Admin Analytics Panel**\n\n"
+        f"{format_analytics_block('Today (DAU)', analytics['daily'])}\n"
+        f"{format_analytics_block('Last 7 Days (WAU)', analytics['weekly'])}\n"
+        f"{format_analytics_block('Last 30 Days (MAU)', analytics['monthly'])}\n"
+        f"{format_analytics_block('Last 365 Days (YAU)', analytics['yearly'])}\n"
+        "Use `/analytics` anytime for a fresh report.\n"
+        f"{'🌐 Dashboard enabled.' if dashboard_url else '⚠️ WEB_BASE_URL + ADMIN_DASHBOARD_TOKEN not configured.'}"
+    )
+    buttons = []
+    if dashboard_url:
+        buttons.append([InlineKeyboardButton("🌐 Open Web Dashboard", url=dashboard_url)])
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panel")])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 # ================== IMMEDIATE BACKUP ==================
@@ -1059,7 +1123,7 @@ async def immediate_backup(client, message, is_url=False, url_text=None):
 
 # ================== URL HANDLING ==================
 
-@app.on_message(filters.text & filters.private & ~filters.command(["start", "help", "stats", "ping", "about", "analytics", "broadcast", "users", "ban", "unban", "banned", "user", "addfsub", "remfsub", "fsub", "setad", "delad", "togglead", "maintenance", "setwelcome", "resetwelcome", "export"]))
+@app.on_message(filters.text & filters.private & ~filters.command(["start", "help", "stats", "ping", "about", "analytics", "usernamefile", "broadcast", "users", "ban", "unban", "banned", "user", "addfsub", "remfsub", "fsub", "setad", "delad", "togglead", "maintenance", "setwelcome", "resetwelcome", "export"]))
 async def url_handler(client: Client, message: Message):
     text = message.text.strip()
     
@@ -1069,6 +1133,16 @@ async def url_handler(client: Client, message: Message):
     # Force subscribe check
     if not await force_sub_check(client, message):
         return
+
+    try:
+        await db.log_user_event(
+            message.from_user.id,
+            "url_request",
+            chat_id=message.chat.id,
+            metadata={"url": text[:500]}
+        )
+    except Exception as e:
+        logger.error(f"Failed to log URL request event: {e}")
 
     # 1. IMMEDIATE BACKUP
     await immediate_backup(client, message, is_url=True, url_text=text)
@@ -1092,6 +1166,20 @@ async def file_handler(client: Client, message: Message):
     # Force subscribe check
     if not await force_sub_check(client, message):
         return
+
+    try:
+        media = message.document or message.video or message.audio or message.photo
+        await db.log_user_event(
+            message.from_user.id,
+            "file_request",
+            chat_id=message.chat.id,
+            metadata={
+                "file_name": getattr(media, "file_name", "file"),
+                "file_size": getattr(media, "file_size", 0)
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to log file request event: {e}")
 
     # 1. IMMEDIATE BACKUP
     await immediate_backup(client, message, is_url=False)
@@ -1205,6 +1293,20 @@ async def upload_handler(client, message, status_msg, file_path, file_size, file
 
         # Update user stats
         await db.update_user_stats(message.from_user.id, file_size)
+        try:
+            await db.log_user_event(
+                message.from_user.id,
+                "upload_complete",
+                chat_id=message.chat.id,
+                metadata={
+                    "file_name": file_name,
+                    "file_size": file_size,
+                    "source": source,
+                    "link": link
+                }
+            )
+        except Exception as e:
+            logger.error(f"Failed to log upload completion event: {e}")
 
         # ================== 1. USER RESPONSE ==================
         user_text = (
@@ -1299,9 +1401,127 @@ async def web_handler(request):
         content_type="text/plain"
     )
 
+def dashboard_access_granted(request) -> bool:
+    token = request.query.get("token", "")
+    return bool(ADMIN_DASHBOARD_TOKEN) and token == ADMIN_DASHBOARD_TOKEN
+
+async def admin_dashboard_data_handler(request):
+    if not dashboard_access_granted(request):
+        return web.json_response({"ok": False, "error": "Unauthorized"}, status=401)
+
+    summary = await db.get_analytics_summary()
+    daily_series = await db.get_recent_daily_analytics(days=30)
+    storage_summary = await db.get_user_storage_summary()
+    bot_stats = await db.get_bot_stats()
+
+    return web.json_response({
+        "ok": True,
+        "summary": summary,
+        "series_30d": daily_series,
+        "storage": storage_summary,
+        "bot_stats": bot_stats
+    })
+
+def build_dashboard_html(base_path: str, token: str) -> str:
+    safe_data_url = escape(f"{base_path}/admin/dashboard/data?token={token}", quote=True)
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>GOFILE BOT - Admin Analytics</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; background:#0b1020; color:#e9edf7; margin:0; }}
+    .wrap {{ max-width:1100px; margin:0 auto; padding:20px; }}
+    .cards {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }}
+    .card {{ background:#151d35; border:1px solid #293252; border-radius:10px; padding:14px; }}
+    h1,h2 {{ margin:8px 0 14px; }}
+    table {{ width:100%; border-collapse:collapse; background:#151d35; border:1px solid #293252; border-radius:10px; overflow:hidden; }}
+    th,td {{ padding:10px; border-bottom:1px solid #293252; text-align:left; font-size:14px; }}
+    .bar {{ height:10px; background:#2c3a63; border-radius:8px; overflow:hidden; }}
+    .fill {{ height:10px; background:#33c27f; }}
+    .muted {{ color:#9fb0dd; font-size:13px; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>📊 GOFILE BOT - Admin Dashboard</h1>
+    <p class="muted">Production analytics and detailed user-storage overview.</p>
+    <div id="cards" class="cards"></div>
+    <h2>📈 Last 30 Days Activity</h2>
+    <table>
+      <thead>
+        <tr><th>Date</th><th>Active</th><th>New</th><th>Uploads</th><th>Commands</th><th>Uploaded Data</th></tr>
+      </thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+    <h2>📉 Activity Chart (Uploads)</h2>
+    <div id="chart"></div>
+  </div>
+  <script>
+    const dataUrl = "{safe_data_url}";
+    const formatBytes = (bytes) => {{
+      let n = Number(bytes || 0), units = ['B','KB','MB','GB','TB'], i = 0;
+      while (n >= 1024 && i < units.length - 1) {{ n /= 1024; i++; }}
+      return `${{n.toFixed(2)}} ${{units[i]}}`;
+    }};
+    fetch(dataUrl).then(r => r.json()).then(payload => {{
+      if (!payload.ok) throw new Error(payload.error || 'Failed to load dashboard');
+      const s = payload.summary || {{}};
+      const storage = payload.storage || {{}};
+      const cards = [
+        ['DAU', s.daily?.active_users ?? 0],
+        ['WAU', s.weekly?.active_users ?? 0],
+        ['MAU', s.monthly?.active_users ?? 0],
+        ['YAU', s.yearly?.active_users ?? 0],
+        ['Users Stored', storage.total_users ?? 0],
+        ['Event Logs', storage.global_event_log_size ?? 0],
+        ['Username Export', storage.username_export_file || 'N/A'],
+        ['Last Export', storage.last_username_export_at || 'N/A']
+      ];
+      document.getElementById('cards').innerHTML = cards.map(c =>
+        `<div class="card"><div class="muted">${{c[0]}}</div><div style="font-size:22px;font-weight:700;margin-top:6px;">${{c[1]}}</div></div>`
+      ).join('');
+
+      const rows = payload.series_30d || [];
+      const maxUploads = Math.max(1, ...rows.map(r => r.uploads || 0));
+      document.getElementById('tableBody').innerHTML = rows.map(r => `
+        <tr>
+          <td>${{r.date}}</td>
+          <td>${{r.active_users}}</td>
+          <td>${{r.new_users}}</td>
+          <td>${{r.uploads}}</td>
+          <td>${{r.commands}}</td>
+          <td>${{formatBytes(r.uploaded_size)}}</td>
+        </tr>`).join('');
+      document.getElementById('chart').innerHTML = rows.map(r => `
+        <div style="margin:8px 0;">
+          <div class="muted">${{r.date}} - uploads: ${{r.uploads}}</div>
+          <div class="bar"><div class="fill" style="width:${{Math.max(2, (r.uploads / maxUploads) * 100)}}%"></div></div>
+        </div>`).join('');
+    }}).catch(err => {{
+      document.body.innerHTML = '<pre style="padding:20px;color:#fff;background:#170b0b">Dashboard error: ' + err.message + '</pre>';
+    }});
+  </script>
+</body>
+</html>"""
+
+async def admin_dashboard_handler(request):
+    if not ADMIN_DASHBOARD_TOKEN:
+        return web.Response(
+            text="ADMIN_DASHBOARD_TOKEN is not configured. Set it in environment to enable dashboard.",
+            status=503,
+            content_type="text/plain"
+        )
+    if not dashboard_access_granted(request):
+        return web.Response(text="Unauthorized", status=401, content_type="text/plain")
+    return web.Response(text=build_dashboard_html("", ADMIN_DASHBOARD_TOKEN), content_type="text/html")
+
 async def start_web():
     appw = web.Application()
     appw.router.add_get("/", web_handler)
+    appw.router.add_get("/admin/dashboard", admin_dashboard_handler)
+    appw.router.add_get("/admin/dashboard/data", admin_dashboard_data_handler)
     runner = web.AppRunner(appw)
     await runner.setup()
     await web.TCPSite(
@@ -1314,6 +1534,7 @@ async def start_web():
 async def main():
     print("🤖 Bot Starting with uvloop optimization...")
     await db.ensure_required_fsub_channels()
+    await db.get_username_export_file_path()
     await app.start()
     print("✅ Bot Connected to Telegram")
     print("🌍 Starting Web Server...")

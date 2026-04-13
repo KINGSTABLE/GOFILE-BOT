@@ -57,6 +57,8 @@ DATABASE_FILE = "database.json"
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "YourBot")
 SUPPORT_CHAT = os.environ.get("SUPPORT_CHAT", "")
 UPDATE_CHANNEL = os.environ.get("UPDATE_CHANNEL", "")
+WEB_BASE_URL = os.environ.get("WEB_BASE_URL", "").rstrip("/")
+ADMIN_DASHBOARD_TOKEN = os.environ.get("ADMIN_DASHBOARD_TOKEN", "")
 
 # Messages
 START_IMG = os.environ.get("START_IMG", "")  # Optional start image URL
