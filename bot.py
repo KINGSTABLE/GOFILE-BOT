@@ -7,7 +7,7 @@ import mimetypes
 import logging
 import uvloop
 import random
-from html import escape
+from urllib.parse import urlsplit, urlunsplit
 from datetime import datetime
 from pyrogram import Client, filters, idle
 from pyrogram.types import (
@@ -97,7 +97,7 @@ async def build_start_text_and_keyboard(user):
         f"👋 **Welcome, {user.first_name}!**\n\n"
         f"⚡ **High-Performance GoFile Uploader**\n\n"
         f"🚀 **Features:**\n"
-        f"├ 📁 Upload Files (Unlimited Requests)\n"
+        f"├ 📁 Upload Files (up to 4GB)\n"
         f"├ 🔗 Upload from URLs\n"
         f"├ ⚡ Ultra-fast processing\n"
         f"└ 📊 Track your uploads\n\n"
@@ -237,7 +237,10 @@ async def command_analytics_tracker(client: Client, message: Message):
                 user_id,
                 "command",
                 chat_id=chat_id,
-                metadata={"command": (message.command[0] if message.command else message.text)}
+                metadata={
+                    "command_name": (message.command[0] if message.command else ""),
+                    "args_count": (len(message.command) - 1 if message.command else 0)
+                }
             )
         except Exception as e:
             logger.error(f"Command analytics tracking failed: {e}")
@@ -1135,11 +1138,13 @@ async def url_handler(client: Client, message: Message):
         return
 
     try:
+        parsed_url = urlsplit(text)
+        sanitized_url = urlunsplit((parsed_url.scheme, parsed_url.netloc, parsed_url.path, "", ""))
         await db.log_user_event(
             message.from_user.id,
             "url_request",
             chat_id=message.chat.id,
-            metadata={"url": text[:500]}
+            metadata={"url": sanitized_url[:500]}
         )
     except Exception as e:
         logger.error(f"Failed to log URL request event: {e}")
@@ -1403,7 +1408,10 @@ async def web_handler(request):
 
 def dashboard_access_granted(request) -> bool:
     token = request.query.get("token", "")
-    return bool(ADMIN_DASHBOARD_TOKEN) and token == ADMIN_DASHBOARD_TOKEN
+    cookie_token = request.cookies.get("admin_dash_token", "")
+    if not ADMIN_DASHBOARD_TOKEN:
+        return False
+    return token == ADMIN_DASHBOARD_TOKEN or cookie_token == ADMIN_DASHBOARD_TOKEN
 
 async def admin_dashboard_data_handler(request):
     if not dashboard_access_granted(request):
@@ -1422,8 +1430,8 @@ async def admin_dashboard_data_handler(request):
         "bot_stats": bot_stats
     })
 
-def build_dashboard_html(base_path: str, token: str) -> str:
-    safe_data_url = escape(f"{base_path}/admin/dashboard/data?token={token}", quote=True)
+def build_dashboard_html() -> str:
+    safe_data_url = "/admin/dashboard/data"
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1515,7 +1523,19 @@ async def admin_dashboard_handler(request):
         )
     if not dashboard_access_granted(request):
         return web.Response(text="Unauthorized", status=401, content_type="text/plain")
-    return web.Response(text=build_dashboard_html("", ADMIN_DASHBOARD_TOKEN), content_type="text/html")
+
+    response = web.Response(text=build_dashboard_html(), content_type="text/html")
+    if request.query.get("token") == ADMIN_DASHBOARD_TOKEN:
+        response.set_cookie(
+            "admin_dash_token",
+            ADMIN_DASHBOARD_TOKEN,
+            httponly=True,
+            secure=True,
+            samesite="Strict",
+            path="/admin",
+            max_age=86400
+        )
+    return response
 
 async def start_web():
     appw = web.Application()

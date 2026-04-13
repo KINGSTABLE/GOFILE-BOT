@@ -7,6 +7,8 @@ from config import DATABASE_FILE, REQUIRED_FSUB_CHANNELS
 import logging
 
 logger = logging.getLogger(__name__)
+MAX_USER_EVENTS_PER_USER = 200
+MAX_GLOBAL_USER_EVENTS = 20000
 
 class Database:
     def __init__(self):
@@ -148,7 +150,7 @@ class Database:
             await self._save_db()
     
     def _write_username_snapshot(self):
-        """Write username_{totalusername}.txt snapshot"""
+        """Write Username_{totalusername}.txt snapshot"""
         users = self.data.get("users", {})
         total = len(users)
         db_dir = os.path.dirname(self.db_file) or "."
@@ -175,18 +177,23 @@ class Database:
             )
 
         temp_path = f"{path}.tmp"
-        with open(temp_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-        os.replace(temp_path, path)
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+            os.replace(temp_path, path)
+        except Exception as e:
+            logger.error(f"Failed writing username snapshot file {filename}: {e}")
+            return
 
         old_file = self.data["bot_stats"].get("username_export_file")
-        if old_file and old_file != filename:
-            old_path = os.path.join(db_dir, old_file)
+        safe_old_file = os.path.basename(old_file) if old_file else ""
+        if safe_old_file and safe_old_file == old_file and safe_old_file != filename:
+            old_path = os.path.join(db_dir, safe_old_file)
             if os.path.exists(old_path):
                 try:
                     os.remove(old_path)
                 except Exception as e:
-                    logger.warning(f"Could not remove old username export {old_file}: {e}")
+                    logger.warning(f"Could not remove old username export {safe_old_file}: {e}")
 
         self.data["bot_stats"]["username_export_file"] = filename
         self.data["bot_stats"]["last_username_export_at"] = datetime.now().isoformat()
@@ -209,8 +216,8 @@ class Database:
         if user_data:
             user_events = user_data.setdefault("events", [])
             user_events.append(event)
-            if len(user_events) > 200:
-                del user_events[:-200]
+            if len(user_events) > MAX_USER_EVENTS_PER_USER:
+                user_events[:] = user_events[-MAX_USER_EVENTS_PER_USER:]
             user_data["events_count"] = int(user_data.get("events_count", 0)) + 1
             user_data["last_active"] = now_iso
             user_data["last_active_unix"] = int(datetime.now().timestamp())
@@ -224,8 +231,8 @@ class Database:
 
         global_events = self.data.setdefault("user_events", [])
         global_events.append(event)
-        if len(global_events) > 20000:
-            del global_events[:-20000]
+        if len(global_events) > MAX_GLOBAL_USER_EVENTS:
+            global_events[:] = global_events[-MAX_GLOBAL_USER_EVENTS:]
 
         if event_type == "command":
             await self.track_activity(int(user_id), event_type="command", persist=False)
