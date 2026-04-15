@@ -133,9 +133,11 @@ async def build_start_text_and_keyboard(user):
     return welcome_text, InlineKeyboardMarkup(buttons)
 
 def strip_markdown_formatting(text: str) -> str:
-    return re.sub(r"[*_`~>\#\+\-\=\|\{\}\[\]\(\)]", "", text)
+    return re.sub(r"[*_`~>#+=|{}\[\]()-]", "", text)
 
 async def send_start_response(message: Message, welcome_text: str, keyboard: InlineKeyboardMarkup):
+    user_id = getattr(getattr(message, "from_user", None), "id", "unknown")
+    chat_id = getattr(getattr(message, "chat", None), "id", "unknown")
     if START_IMG:
         try:
             await message.reply_photo(
@@ -145,7 +147,7 @@ async def send_start_response(message: Message, welcome_text: str, keyboard: Inl
             )
             return
         except Exception as e:
-            logger.error(f"Failed to send START_IMG welcome: {e}")
+            logger.error(f"Failed to send START_IMG welcome (user={user_id}, chat={chat_id}): {e}")
 
     try:
         await message.reply_text(
@@ -153,7 +155,7 @@ async def send_start_response(message: Message, welcome_text: str, keyboard: Inl
             reply_markup=keyboard
         )
     except Exception as e:
-        logger.error(f"Failed to send markdown welcome text, falling back to plain text: {e}")
+        logger.error(f"Failed to send markdown welcome text (user={user_id}, chat={chat_id}), falling back to plain text: {e}")
         try:
             await message.reply_text(
                 strip_markdown_formatting(welcome_text),
@@ -161,22 +163,24 @@ async def send_start_response(message: Message, welcome_text: str, keyboard: Inl
                 parse_mode=None
             )
         except Exception as fallback_error:
-            logger.error(f"Failed to send plain-text welcome fallback: {fallback_error}")
+            logger.error(f"Failed to send plain-text welcome fallback (user={user_id}, chat={chat_id}): {fallback_error}")
 
 async def edit_start_response(callback: CallbackQuery, welcome_text: str, keyboard: InlineKeyboardMarkup):
+    user_id = getattr(getattr(callback, "from_user", None), "id", "unknown")
+    chat_id = getattr(getattr(getattr(callback, "message", None), "chat", None), "id", "unknown")
     try:
         await callback.message.edit_text(welcome_text, reply_markup=keyboard)
     except Exception as e:
-        logger.error(f"Failed to edit start text, falling back to plain text: {e}")
+        logger.error(f"Failed to edit start text (user={user_id}, chat={chat_id}), falling back to plain text: {e}")
         plain_text = strip_markdown_formatting(welcome_text)
         try:
             await callback.message.edit_text(plain_text, reply_markup=keyboard, parse_mode=None)
         except Exception as e:
-            logger.error(f"Failed to edit plain-text start message; sending reply instead: {e}")
+            logger.error(f"Failed to edit plain-text start message (user={user_id}, chat={chat_id}); sending reply instead: {e}")
             try:
                 await callback.message.reply_text(plain_text, reply_markup=keyboard, parse_mode=None)
             except Exception as fallback_error:
-                logger.error(f"Failed to send plain-text start reply fallback: {fallback_error}")
+                logger.error(f"Failed to send plain-text start reply fallback (user={user_id}, chat={chat_id}): {fallback_error}")
  
 # ================== FORCE SUBSCRIBE MIDDLEWARE ==================
 
