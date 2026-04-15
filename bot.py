@@ -131,6 +131,45 @@ async def build_start_text_and_keyboard(user):
 
     return welcome_text, InlineKeyboardMarkup(buttons)
 
+def strip_markdown_formatting(text: str) -> str:
+    return text.replace("**", "").replace("__", "").replace("`", "")
+
+async def send_start_response(message: Message, welcome_text: str, keyboard: InlineKeyboardMarkup):
+    if START_IMG:
+        try:
+            await message.reply_photo(
+                START_IMG,
+                caption=welcome_text,
+                reply_markup=keyboard
+            )
+            return
+        except Exception as e:
+            logger.error(f"Failed to send START_IMG welcome: {e}")
+
+    try:
+        await message.reply_text(
+            welcome_text,
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"Failed to send markdown welcome text, falling back to plain text: {e}")
+        await message.reply_text(
+            strip_markdown_formatting(welcome_text),
+            reply_markup=keyboard,
+            parse_mode=None
+        )
+
+async def edit_start_response(callback: CallbackQuery, welcome_text: str, keyboard: InlineKeyboardMarkup):
+    try:
+        await callback.message.edit_text(welcome_text, reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Failed to edit start text, falling back to plain text: {e}")
+        plain_text = strip_markdown_formatting(welcome_text)
+        try:
+            await callback.message.edit_text(plain_text, reply_markup=keyboard, parse_mode=None)
+        except Exception:
+            await callback.message.reply_text(plain_text, reply_markup=keyboard, parse_mode=None)
+ 
 # ================== FORCE SUBSCRIBE MIDDLEWARE ==================
 
 async def force_sub_check(client: Client, message: Message) -> bool:
@@ -258,18 +297,7 @@ async def start(client: Client, message: Message):
         return
     
     welcome_text, keyboard = await build_start_text_and_keyboard(user)
-    
-    if START_IMG:
-        await message.reply_photo(
-            START_IMG,
-            caption=welcome_text,
-            reply_markup=keyboard
-        )
-    else:
-        await message.reply_text(
-            welcome_text,
-            reply_markup=keyboard
-        )
+    await send_start_response(message, welcome_text, keyboard)
 
 # ================== HELP COMMAND ==================
 
@@ -351,7 +379,7 @@ async def go_start_callback(client: Client, callback: CallbackQuery):
             return
 
     welcome_text, keyboard = await build_start_text_and_keyboard(user)
-    await callback.message.edit_text(welcome_text, reply_markup=keyboard)
+    await edit_start_response(callback, welcome_text, keyboard)
 
 # ================== USER STATS ==================
 
