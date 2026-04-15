@@ -4,6 +4,7 @@ import aiohttp
 import asyncio
 import time
 import mimetypes
+import re
 import logging
 import uvloop
 import random
@@ -132,7 +133,8 @@ async def build_start_text_and_keyboard(user):
     return welcome_text, InlineKeyboardMarkup(buttons)
 
 def strip_markdown_formatting(text: str) -> str:
-    return text.replace("**", "").replace("__", "").replace("`", "")
+    plain = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", text)
+    return re.sub(r"[*_`~>\#\+\-\=\|\{\}\[\]\(\)]", "", plain)
 
 async def send_start_response(message: Message, welcome_text: str, keyboard: InlineKeyboardMarkup):
     if START_IMG:
@@ -167,7 +169,8 @@ async def edit_start_response(callback: CallbackQuery, welcome_text: str, keyboa
         plain_text = strip_markdown_formatting(welcome_text)
         try:
             await callback.message.edit_text(plain_text, reply_markup=keyboard, parse_mode=None)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Failed to edit plain-text start message; sending reply instead: {e}")
             await callback.message.reply_text(plain_text, reply_markup=keyboard, parse_mode=None)
  
 # ================== FORCE SUBSCRIBE MIDDLEWARE ==================
