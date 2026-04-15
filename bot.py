@@ -133,8 +133,7 @@ async def build_start_text_and_keyboard(user):
     return welcome_text, InlineKeyboardMarkup(buttons)
 
 def strip_markdown_formatting(text: str) -> str:
-    plain = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", text)
-    return re.sub(r"[*_`~>\#\+\-\=\|\{\}\[\]\(\)]", "", plain)
+    return re.sub(r"[*_`~>\#\+\-\=\|\{\}\[\]\(\)]", "", text)
 
 async def send_start_response(message: Message, welcome_text: str, keyboard: InlineKeyboardMarkup):
     if START_IMG:
