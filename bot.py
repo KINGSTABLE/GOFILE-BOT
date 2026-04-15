@@ -4,6 +4,7 @@ import aiohttp
 import asyncio
 import time
 import mimetypes
+import re
 import logging
 import uvloop
 import random
@@ -131,6 +132,57 @@ async def build_start_text_and_keyboard(user):
 
     return welcome_text, InlineKeyboardMarkup(buttons)
 
+def strip_markdown_formatting(text: str) -> str:
+    return re.sub(r"[*_`~>#+=|{}\[\]()]", "", text)
+
+async def send_start_response(message: Message, welcome_text: str, keyboard: InlineKeyboardMarkup):
+    user_id = message.from_user.id if message.from_user else "unknown"
+    chat_id = message.chat.id if message.chat else "unknown"
+    if START_IMG:
+        try:
+            await message.reply_photo(
+                START_IMG,
+                caption=welcome_text,
+                reply_markup=keyboard
+            )
+            return
+        except Exception as e:
+            logger.error(f"Failed to send START_IMG welcome (user={user_id}, chat={chat_id}): {e}")
+
+    try:
+        await message.reply_text(
+            welcome_text,
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"Failed to send markdown welcome text (user={user_id}, chat={chat_id}), falling back to plain text: {e}")
+        try:
+            await message.reply_text(
+                strip_markdown_formatting(welcome_text),
+                reply_markup=keyboard,
+                parse_mode=None
+            )
+        except Exception as plain_send_error:
+            logger.error(f"Failed to send plain-text welcome fallback (user={user_id}, chat={chat_id}): {plain_send_error}")
+
+async def edit_start_response(callback: CallbackQuery, welcome_text: str, keyboard: InlineKeyboardMarkup):
+    callback_message = callback.message if callback else None
+    user_id = callback.from_user.id if callback and callback.from_user else "unknown"
+    chat_id = callback_message.chat.id if callback_message and callback_message.chat else "unknown"
+    try:
+        await callback.message.edit_text(welcome_text, reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Failed to edit start text (user={user_id}, chat={chat_id}), falling back to plain text: {e}")
+        plain_text = strip_markdown_formatting(welcome_text)
+        try:
+            await callback.message.edit_text(plain_text, reply_markup=keyboard, parse_mode=None)
+        except Exception as plain_edit_error:
+            logger.error(f"Failed to edit plain-text start message (user={user_id}, chat={chat_id}); sending reply instead: {plain_edit_error}")
+            try:
+                await callback.message.reply_text(plain_text, reply_markup=keyboard, parse_mode=None)
+            except Exception as plain_reply_error:
+                logger.error(f"Failed to send plain-text start reply fallback (user={user_id}, chat={chat_id}): {plain_reply_error}")
+ 
 # ================== FORCE SUBSCRIBE MIDDLEWARE ==================
 
 async def force_sub_check(client: Client, message: Message) -> bool:
@@ -258,18 +310,7 @@ async def start(client: Client, message: Message):
         return
     
     welcome_text, keyboard = await build_start_text_and_keyboard(user)
-    
-    if START_IMG:
-        await message.reply_photo(
-            START_IMG,
-            caption=welcome_text,
-            reply_markup=keyboard
-        )
-    else:
-        await message.reply_text(
-            welcome_text,
-            reply_markup=keyboard
-        )
+    await send_start_response(message, welcome_text, keyboard)
 
 # ================== HELP COMMAND ==================
 
@@ -351,7 +392,7 @@ async def go_start_callback(client: Client, callback: CallbackQuery):
             return
 
     welcome_text, keyboard = await build_start_text_and_keyboard(user)
-    await callback.message.edit_text(welcome_text, reply_markup=keyboard)
+    await edit_start_response(callback, welcome_text, keyboard)
 
 # ================== USER STATS ==================
 
