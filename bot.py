@@ -162,8 +162,8 @@ async def send_start_response(message: Message, welcome_text: str, keyboard: Inl
                 reply_markup=keyboard,
                 parse_mode=None
             )
-        except Exception as fallback_error:
-            logger.error(f"Failed to send plain-text welcome fallback (user={user_id}, chat={chat_id}): {fallback_error}")
+        except Exception as plain_send_error:
+            logger.error(f"Failed to send plain-text welcome fallback (user={user_id}, chat={chat_id}): {plain_send_error}")
 
 async def edit_start_response(callback: CallbackQuery, welcome_text: str, keyboard: InlineKeyboardMarkup):
     callback_message = callback.message if callback else None
@@ -176,12 +176,12 @@ async def edit_start_response(callback: CallbackQuery, welcome_text: str, keyboa
         plain_text = strip_markdown_formatting(welcome_text)
         try:
             await callback.message.edit_text(plain_text, reply_markup=keyboard, parse_mode=None)
-        except Exception as fallback_error:
-            logger.error(f"Failed to edit plain-text start message (user={user_id}, chat={chat_id}); sending reply instead: {fallback_error}")
+        except Exception as plain_edit_error:
+            logger.error(f"Failed to edit plain-text start message (user={user_id}, chat={chat_id}); sending reply instead: {plain_edit_error}")
             try:
                 await callback.message.reply_text(plain_text, reply_markup=keyboard, parse_mode=None)
-            except Exception as fallback_error:
-                logger.error(f"Failed to send plain-text start reply fallback (user={user_id}, chat={chat_id}): {fallback_error}")
+            except Exception as plain_reply_error:
+                logger.error(f"Failed to send plain-text start reply fallback (user={user_id}, chat={chat_id}): {plain_reply_error}")
  
 # ================== FORCE SUBSCRIBE MIDDLEWARE ==================
 
