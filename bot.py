@@ -17,7 +17,7 @@ from pyrogram.types import (
     Message
 )
 from pyrogram.errors import FloodWait, UserNotParticipant
-from asyncio import Queue, Lock
+from asyncio import Queue
 from aiohttp import web
 
 # ================== SPEED OPTIMIZATION ==================
@@ -54,7 +54,9 @@ app = Client(
 )
 
 download_queue = Queue()
-processing_lock = Lock()
+MAX_CONCURRENT_QUEUE_WORKERS = 10
+queue_worker_tasks = []
+shutdown_in_progress = False
 
 # ================== HELPER FUNCTIONS ==================
 
@@ -1157,9 +1159,10 @@ async def url_handler(client: Client, message: Message):
         "🚀 Queued for High-Speed Processing...\n"
         "⏳ Please wait..."
     )
+    if shutdown_in_progress:
+        await msg.edit_text("⚠️ Bot is restarting. Please send your request again in a moment.")
+        return
     await download_queue.put(("url", text, message, msg))
-    
-    asyncio.create_task(process_queue(client))
 
 # ================== FILE HANDLING ==================
 
@@ -1200,29 +1203,35 @@ async def file_handler(client: Client, message: Message):
         f"📦 **Size:** `{human_readable_size(file_size)}`\n\n"
         f"🚀 Queued for High-Speed Processing..."
     )
+    if shutdown_in_progress:
+        await msg.edit_text("⚠️ Bot is restarting. Please send your file again in a moment.")
+        return
     await download_queue.put(("file", media, message, msg))
-    
-    asyncio.create_task(process_queue(client))
 
 # ================== QUEUE PROCESSOR ==================
 
-async def process_queue(client):
-    async with processing_lock:
-        while not download_queue.empty():
-            task = await download_queue.get()
-            type_ = task[0]
-            
+async def queue_worker(client: Client, worker_number: int):
+    while True:
+        queued_task = await download_queue.get()
+        if queued_task is None:
+            download_queue.task_done()
+            break
+
+        type_ = queued_task[0]
+
+        try:
+            if type_ == "file":
+                await process_tg_file(client, *queued_task[1:])
+            elif type_ == "url":
+                await process_url_file(client, *queued_task[1:])
+        except Exception as e:
+            logger.error(f"Queue Worker {worker_number} Error: {e}")
             try:
-                if type_ == "file":
-                    await process_tg_file(client, *task[1:])
-                elif type_ == "url":
-                    await process_url_file(client, *task[1:])
-            except Exception as e:
-                logger.error(f"Queue Error: {e}")
-                try:
-                    await task[3].edit_text(f"❌ **Error:**\n`{str(e)}`")
-                except:
-                    pass
+                await queued_task[3].edit_text(f"❌ **Error:**\n`{str(e)}`")
+            except:
+                pass
+        finally:
+            download_queue.task_done()
 
 # ================== FAST DOWNLOAD LOGIC ==================
 
@@ -1552,15 +1561,24 @@ async def start_web():
 # ================== MAIN EXECUTION ==================
 
 async def main():
+    global shutdown_in_progress
     print("🤖 Bot Starting with uvloop optimization...")
     await db.ensure_required_fsub_channels()
     await db.get_username_export_file_path()
     await app.start()
+    for i in range(MAX_CONCURRENT_QUEUE_WORKERS):
+        queue_worker_tasks.append(asyncio.create_task(queue_worker(app, i)))
+    print(f"⚙️ Started {MAX_CONCURRENT_QUEUE_WORKERS} concurrent queue workers.")
     print("✅ Bot Connected to Telegram")
     print("🌍 Starting Web Server...")
     await start_web()
     print("🚀 High Speed Pipeline Ready. Waiting for requests.")
     await idle()
+    shutdown_in_progress = True
+    await download_queue.join()
+    for _ in queue_worker_tasks:
+        await download_queue.put(None)
+    await asyncio.gather(*queue_worker_tasks, return_exceptions=True)
     await app.stop()
 
 if __name__ == "__main__":
