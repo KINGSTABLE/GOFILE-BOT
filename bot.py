@@ -155,11 +155,14 @@ async def send_start_response(message: Message, welcome_text: str, keyboard: Inl
         )
     except Exception as e:
         logger.error(f"Failed to send markdown welcome text, falling back to plain text: {e}")
-        await message.reply_text(
-            strip_markdown_formatting(welcome_text),
-            reply_markup=keyboard,
-            parse_mode=None
-        )
+        try:
+            await message.reply_text(
+                strip_markdown_formatting(welcome_text),
+                reply_markup=keyboard,
+                parse_mode=None
+            )
+        except Exception as fallback_error:
+            logger.error(f"Failed to send plain-text welcome fallback: {fallback_error}")
 
 async def edit_start_response(callback: CallbackQuery, welcome_text: str, keyboard: InlineKeyboardMarkup):
     try:
@@ -171,7 +174,10 @@ async def edit_start_response(callback: CallbackQuery, welcome_text: str, keyboa
             await callback.message.edit_text(plain_text, reply_markup=keyboard, parse_mode=None)
         except Exception as e:
             logger.error(f"Failed to edit plain-text start message; sending reply instead: {e}")
-            await callback.message.reply_text(plain_text, reply_markup=keyboard, parse_mode=None)
+            try:
+                await callback.message.reply_text(plain_text, reply_markup=keyboard, parse_mode=None)
+            except Exception as fallback_error:
+                logger.error(f"Failed to send plain-text start reply fallback: {fallback_error}")
  
 # ================== FORCE SUBSCRIBE MIDDLEWARE ==================
 
