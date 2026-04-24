@@ -4,6 +4,7 @@ import aiohttp
 import asyncio
 import time
 import mimetypes
+import csv
 import re
 import logging
 import uvloop
@@ -595,21 +596,19 @@ async def admin_broadcast_callback(client: Client, callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 # ----- USERS MANAGEMENT -----
-def sanitize_export_field(field: str) -> str:
-    return field.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").replace("\r", " ")
-
 async def generate_users_export_file() -> tuple[str, int]:
     users = await db.get_all_users()
     if not users:
         return "", 0
 
-    export_filename = f"users_export_{int(time.time())}.txt"
-    export_path = os.path.join(DOWNLOAD_DIR, export_filename)
+    filename = f"users_export_{int(time.time())}.txt"
+    export_path = os.path.join(DOWNLOAD_DIR, filename)
 
     with open(export_path, "w", encoding="utf-8") as f:
-        f.write("user_id|username|first_name|last_name|joined_date|last_active|uploads|total_size_bytes\n")
+        writer = csv.writer(f, delimiter="|", quotechar='"', quoting=csv.QUOTE_MINIMAL)
+        writer.writerow(["user_id", "username", "first_name", "last_name", "joined_date", "last_active", "uploads", "total_size_bytes"])
         for user in users.values():
-            raw_row = [
+            row = [
                 str(user.get("user_id", "")),
                 str(user.get("username", "")),
                 str(user.get("first_name", "")),
@@ -619,8 +618,7 @@ async def generate_users_export_file() -> tuple[str, int]:
                 str(user.get("uploads_count", 0)),
                 str(user.get("total_size", 0)),
             ]
-            sanitized_row = [sanitize_export_field(field) for field in raw_row]
-            f.write("|".join(sanitized_row) + "\n")
+            writer.writerow(row)
 
     return export_path, len(users)
 
@@ -725,7 +723,7 @@ async def banned_list_callback(client: Client, callback: CallbackQuery):
     if not banned:
         text = "✅ No banned users!"
     else:
-        banned_lines = [f"• `{user_id}`" for user_id in banned[:50]]
+        banned_lines = [f"• `{strip_markdown_formatting(str(user_id))}`" for user_id in banned[:50]]
         text = "🚫 **Banned Users:**\n\n" + "\n".join(banned_lines)
         if len(banned) > 50:
             text += f"\n_...and {len(banned) - 50} more_"
