@@ -601,11 +601,11 @@ async def generate_users_export_file() -> tuple[str, int]:
     if not users:
         return "", 0
 
-    filename = f"users_export_{int(time.time())}.txt"
+    filename = f"users_export_{int(time.time())}.csv"
     export_path = os.path.join(DOWNLOAD_DIR, filename)
 
     with open(export_path, "w", encoding="utf-8") as f:
-        writer = csv.writer(f, delimiter="|", quotechar='"', quoting=csv.QUOTE_MINIMAL)
+        writer = csv.writer(f, quotechar='"', quoting=csv.QUOTE_MINIMAL)
         writer.writerow(["user_id", "username", "first_name", "last_name", "joined_date", "last_active", "uploads", "total_size_bytes"])
         for user in users.values():
             row = [
