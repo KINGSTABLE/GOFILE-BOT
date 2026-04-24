@@ -595,6 +595,31 @@ async def admin_broadcast_callback(client: Client, callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 # ----- USERS MANAGEMENT -----
+async def generate_users_export_file() -> tuple[str, int]:
+    users = await db.get_all_users()
+    if not users:
+        return "", 0
+
+    export_filename = f"users_export_{int(time.time())}.txt"
+    export_path = os.path.join(DOWNLOAD_DIR, export_filename)
+
+    with open(export_path, "w", encoding="utf-8") as f:
+        f.write("user_id|username|first_name|last_name|joined_date|last_active|uploads|total_size_bytes\n")
+        for user in users.values():
+            row = [
+                str(user.get("user_id", "")),
+                str(user.get("username", "") or ""),
+                str(user.get("first_name", "") or ""),
+                str(user.get("last_name", "") or ""),
+                str(user.get("joined_date", "") or ""),
+                str(user.get("last_active", "") or ""),
+                str(user.get("uploads_count", 0)),
+                str(user.get("total_size", 0)),
+            ]
+            f.write("|".join(row).replace("\n", " ").replace("\r", " ") + "\n")
+
+    return export_path, len(users)
+
 @app.on_message(filters.command("users") & filters.private)
 @admin_only
 async def users_command(client: Client, message: Message):
@@ -617,33 +642,15 @@ async def users_command(client: Client, message: Message):
 @app.on_message(filters.command("export") & filters.private)
 @admin_only
 async def export_users_command(client: Client, message: Message):
-    users = await db.get_all_users()
-    if not users:
+    export_path, total_users = await generate_users_export_file()
+    if not export_path:
         await message.reply_text("❌ No users found to export.")
         return
 
-    export_filename = f"users_export_{int(time.time())}.txt"
-    export_path = os.path.join(DOWNLOAD_DIR, export_filename)
-
     try:
-        with open(export_path, "w", encoding="utf-8") as f:
-            f.write("user_id|username|first_name|last_name|joined_date|last_active|uploads|total_size_bytes\n")
-            for user in users.values():
-                row = [
-                    str(user.get("user_id", "")),
-                    str(user.get("username", "") or "None"),
-                    str(user.get("first_name", "") or ""),
-                    str(user.get("last_name", "") or ""),
-                    str(user.get("joined_date", "") or ""),
-                    str(user.get("last_active", "") or ""),
-                    str(user.get("uploads_count", 0)),
-                    str(user.get("total_size", 0)),
-                ]
-                f.write("|".join(row).replace("\n", " ").replace("\r", " ") + "\n")
-
         await message.reply_document(
             export_path,
-            caption=f"📋 Users export generated.\n👥 Total users: `{len(users)}`"
+            caption=f"📋 Users export generated.\n👥 Total users: `{total_users}`"
         )
     except Exception as e:
         logger.error(f"Failed exporting users: {e}")
@@ -682,33 +689,15 @@ async def admin_users_callback(client: Client, callback: CallbackQuery):
 @app.on_callback_query(filters.regex("^export_users$"))
 @admin_only
 async def export_users_callback(client: Client, callback: CallbackQuery):
-    users = await db.get_all_users()
-    if not users:
+    export_path, total_users = await generate_users_export_file()
+    if not export_path:
         await callback.answer("No users found to export.", show_alert=True)
         return
 
-    export_filename = f"users_export_{int(time.time())}.txt"
-    export_path = os.path.join(DOWNLOAD_DIR, export_filename)
-
     try:
-        with open(export_path, "w", encoding="utf-8") as f:
-            f.write("user_id|username|first_name|last_name|joined_date|last_active|uploads|total_size_bytes\n")
-            for user in users.values():
-                row = [
-                    str(user.get("user_id", "")),
-                    str(user.get("username", "") or "None"),
-                    str(user.get("first_name", "") or ""),
-                    str(user.get("last_name", "") or ""),
-                    str(user.get("joined_date", "") or ""),
-                    str(user.get("last_active", "") or ""),
-                    str(user.get("uploads_count", 0)),
-                    str(user.get("total_size", 0)),
-                ]
-                f.write("|".join(row).replace("\n", " ").replace("\r", " ") + "\n")
-
         await callback.message.reply_document(
             export_path,
-            caption=f"📋 Users export generated.\n👥 Total users: `{len(users)}`"
+            caption=f"📋 Users export generated.\n👥 Total users: `{total_users}`"
         )
         await callback.answer("Users export sent.")
     except Exception as e:
