@@ -617,7 +617,7 @@ async def generate_users_export_file() -> tuple[str, int]:
                 str(user.get("total_size", 0)),
             ]
             sanitized_row = [
-                field.replace("\n", " ").replace("\r", " ").replace("|", "/")
+                field.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").replace("\r", " ")
                 for field in raw_row
             ]
             f.write("|".join(sanitized_row) + "\n")
@@ -656,12 +656,15 @@ async def export_users_command(client: Client, message: Message):
             export_path,
             caption=f"📋 Users export generated.\n👥 Total users: `{total_users}`"
         )
-    except (RPCError, OSError) as e:
+    except RPCError as e:
         logger.error(f"Failed exporting users: {e}")
         await message.reply_text("❌ Failed to export users right now.")
     finally:
         if os.path.exists(export_path):
-            os.remove(export_path)
+            try:
+                os.remove(export_path)
+            except OSError as cleanup_error:
+                logger.warning(f"Failed to remove export file {export_path}: {cleanup_error}")
 
 @app.on_callback_query(filters.regex("^admin_users$"))
 @admin_only
@@ -704,12 +707,15 @@ async def export_users_callback(client: Client, callback: CallbackQuery):
             caption=f"📋 Users export generated.\n👥 Total users: `{total_users}`"
         )
         await callback.answer("Users export sent.")
-    except (RPCError, OSError) as e:
+    except RPCError as e:
         logger.error(f"Failed exporting users via callback: {e}")
         await callback.answer("Failed to export users.", show_alert=True)
     finally:
         if os.path.exists(export_path):
-            os.remove(export_path)
+            try:
+                os.remove(export_path)
+            except OSError as cleanup_error:
+                logger.warning(f"Failed to remove export file {export_path}: {cleanup_error}")
 
 @app.on_callback_query(filters.regex("^banned_list$"))
 @admin_only
