@@ -606,17 +606,18 @@ async def generate_users_export_file() -> tuple[str, int]:
     with open(export_path, "w", encoding="utf-8") as f:
         f.write("user_id|username|first_name|last_name|joined_date|last_active|uploads|total_size_bytes\n")
         for user in users.values():
-            row = [
+            raw_row = [
                 str(user.get("user_id", "")),
-                str(user.get("username", "") or ""),
-                str(user.get("first_name", "") or ""),
-                str(user.get("last_name", "") or ""),
-                str(user.get("joined_date", "") or ""),
-                str(user.get("last_active", "") or ""),
+                str(user.get("username", "")),
+                str(user.get("first_name", "")),
+                str(user.get("last_name", "")),
+                str(user.get("joined_date", "")),
+                str(user.get("last_active", "")),
                 str(user.get("uploads_count", 0)),
                 str(user.get("total_size", 0)),
             ]
-            f.write("|".join(row).replace("\n", " ").replace("\r", " ") + "\n")
+            sanitized_row = [field.replace("\n", " ").replace("\r", " ") for field in raw_row]
+            f.write("|".join(sanitized_row) + "\n")
 
     return export_path, len(users)
 
