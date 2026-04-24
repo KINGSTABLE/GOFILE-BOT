@@ -595,6 +595,9 @@ async def admin_broadcast_callback(client: Client, callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 # ----- USERS MANAGEMENT -----
+def sanitize_export_field(field: str) -> str:
+    return field.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").replace("\r", " ")
+
 async def generate_users_export_file() -> tuple[str, int]:
     users = await db.get_all_users()
     if not users:
@@ -616,10 +619,7 @@ async def generate_users_export_file() -> tuple[str, int]:
                 str(user.get("uploads_count", 0)),
                 str(user.get("total_size", 0)),
             ]
-            sanitized_row = [
-                field.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").replace("\r", " ")
-                for field in raw_row
-            ]
+            sanitized_row = [sanitize_export_field(field) for field in raw_row]
             f.write("|".join(sanitized_row) + "\n")
 
     return export_path, len(users)
@@ -725,9 +725,8 @@ async def banned_list_callback(client: Client, callback: CallbackQuery):
     if not banned:
         text = "✅ No banned users!"
     else:
-        text = "🚫 **Banned Users:**\n\n"
-        for user_id in banned[:50]:
-            text += f"• `{user_id}`\n"
+        banned_lines = [f"• `{user_id}`" for user_id in banned[:50]]
+        text = "🚫 **Banned Users:**\n\n" + "\n".join(banned_lines)
         if len(banned) > 50:
             text += f"\n_...and {len(banned) - 50} more_"
 
