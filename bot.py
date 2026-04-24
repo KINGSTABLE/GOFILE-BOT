@@ -17,7 +17,7 @@ from pyrogram.types import (
     CallbackQuery,
     Message
 )
-from pyrogram.errors import FloodWait, UserNotParticipant
+from pyrogram.errors import FloodWait, UserNotParticipant, RPCError
 from asyncio import Queue
 from aiohttp import web
 
@@ -616,7 +616,10 @@ async def generate_users_export_file() -> tuple[str, int]:
                 str(user.get("uploads_count", 0)),
                 str(user.get("total_size", 0)),
             ]
-            sanitized_row = [field.replace("\n", " ").replace("\r", " ") for field in raw_row]
+            sanitized_row = [
+                field.replace("\n", " ").replace("\r", " ").replace("|", "/")
+                for field in raw_row
+            ]
             f.write("|".join(sanitized_row) + "\n")
 
     return export_path, len(users)
@@ -653,7 +656,7 @@ async def export_users_command(client: Client, message: Message):
             export_path,
             caption=f"📋 Users export generated.\n👥 Total users: `{total_users}`"
         )
-    except Exception as e:
+    except (RPCError, OSError) as e:
         logger.error(f"Failed exporting users: {e}")
         await message.reply_text("❌ Failed to export users right now.")
     finally:
@@ -701,7 +704,7 @@ async def export_users_callback(client: Client, callback: CallbackQuery):
             caption=f"📋 Users export generated.\n👥 Total users: `{total_users}`"
         )
         await callback.answer("Users export sent.")
-    except Exception as e:
+    except (RPCError, OSError) as e:
         logger.error(f"Failed exporting users via callback: {e}")
         await callback.answer("Failed to export users.", show_alert=True)
     finally:
