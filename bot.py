@@ -4,6 +4,7 @@ import aiohttp
 import asyncio
 import time
 import mimetypes
+import csv
 import re
 import logging
 import uvloop
@@ -17,7 +18,7 @@ from pyrogram.types import (
     CallbackQuery,
     Message
 )
-from pyrogram.errors import FloodWait, UserNotParticipant
+from pyrogram.errors import FloodWait, UserNotParticipant, RPCError
 from asyncio import Queue
 from aiohttp import web
 
@@ -595,6 +596,32 @@ async def admin_broadcast_callback(client: Client, callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 # ----- USERS MANAGEMENT -----
+async def generate_users_export_file() -> tuple[str, int]:
+    users = await db.get_all_users()
+    if not users:
+        return "", 0
+
+    filename = f"users_export_{int(time.time())}.csv"
+    export_path = os.path.join(DOWNLOAD_DIR, filename)
+
+    with open(export_path, "w", encoding="utf-8") as f:
+        writer = csv.writer(f, quotechar='"', quoting=csv.QUOTE_MINIMAL)
+        writer.writerow(["user_id", "username", "first_name", "last_name", "joined_date", "last_active", "uploads", "total_size_bytes"])
+        for user in users.values():
+            row = [
+                str(user.get("user_id", "")),
+                str(user.get("username", "")),
+                str(user.get("first_name", "")),
+                str(user.get("last_name", "")),
+                str(user.get("joined_date", "")),
+                str(user.get("last_active", "")),
+                str(user.get("uploads_count", 0)),
+                str(user.get("total_size", 0)),
+            ]
+            writer.writerow(row)
+
+    return export_path, len(users)
+
 @app.on_message(filters.command("users") & filters.private)
 @admin_only
 async def users_command(client: Client, message: Message):
@@ -613,6 +640,29 @@ async def users_command(client: Client, message: Message):
     )
     
     await message.reply_text(text)
+
+@app.on_message(filters.command("export") & filters.private)
+@admin_only
+async def export_users_command(client: Client, message: Message):
+    export_path, total_users = await generate_users_export_file()
+    if not export_path:
+        await message.reply_text("❌ No users found to export.")
+        return
+
+    try:
+        await message.reply_document(
+            export_path,
+            caption=f"📋 Users export generated.\n👥 Total users: `{total_users}`"
+        )
+    except RPCError as e:
+        logger.error(f"Failed exporting users: {e}")
+        await message.reply_text("❌ Failed to export users right now.")
+    finally:
+        if os.path.exists(export_path):
+            try:
+                os.remove(export_path)
+            except OSError as cleanup_error:
+                logger.warning(f"Failed to remove export file {export_path}: {cleanup_error}")
 
 @app.on_callback_query(filters.regex("^admin_users$"))
 @admin_only
@@ -639,6 +689,46 @@ async def admin_users_callback(client: Client, callback: CallbackQuery):
         [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]
     ]
     
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+@app.on_callback_query(filters.regex("^export_users$"))
+@admin_only
+async def export_users_callback(client: Client, callback: CallbackQuery):
+    export_path, total_users = await generate_users_export_file()
+    if not export_path:
+        await callback.answer("No users found to export.", show_alert=True)
+        return
+
+    try:
+        await callback.message.reply_document(
+            export_path,
+            caption=f"📋 Users export generated.\n👥 Total users: `{total_users}`"
+        )
+        await callback.answer("Users export sent.")
+    except RPCError as e:
+        logger.error(f"Failed exporting users via callback: {e}")
+        await callback.answer("Failed to export users.", show_alert=True)
+    finally:
+        if os.path.exists(export_path):
+            try:
+                os.remove(export_path)
+            except OSError as cleanup_error:
+                logger.warning(f"Failed to remove export file {export_path}: {cleanup_error}")
+
+@app.on_callback_query(filters.regex("^banned_list$"))
+@admin_only
+async def banned_list_callback(client: Client, callback: CallbackQuery):
+    banned = await db.get_banned_users()
+
+    if not banned:
+        text = "✅ No banned users!"
+    else:
+        banned_lines = [f"• `{strip_markdown_formatting(str(user_id))}`" for user_id in banned[:50]]
+        text = "🚫 **Banned Users:**\n\n" + "\n".join(banned_lines)
+        if len(banned) > 50:
+            text += f"\n_...and {len(banned) - 50} more_"
+
+    buttons = [[InlineKeyboardButton("🔙 Back", callback_data="admin_users")]]
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 @app.on_message(filters.command("ban") & filters.private)
