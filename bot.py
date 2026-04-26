@@ -10,7 +10,7 @@ import logging
 import uvloop
 import random
 from urllib.parse import urlsplit, urlunsplit
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pyrogram import Client, filters, idle
 from pyrogram.types import (
     InlineKeyboardMarkup, 
@@ -62,6 +62,7 @@ shutdown_in_progress = False
 ADMIN_WIZARDS = {}
 ACTION_UNDO = {}
 LIST_PAGE_SIZE = 10
+MAX_CHANNEL_NAME_DISPLAY_LENGTH = 45
 ADMIN_TEXT_COMMANDS = [
     "start", "help", "stats", "ping", "about", "analytics", "usernamefile", "broadcast",
     "users", "ban", "unban", "banned", "user", "addfsub", "remfsub", "fsub", "setad",
@@ -134,6 +135,9 @@ def is_valid_http_url(url: str) -> bool:
     except Exception:
         return False
 
+def is_supported_fsub_chat_type(chat_type) -> bool:
+    return str(chat_type).lower() in ("channel", "supergroup")
+
 def normalize_channel_reference(raw: str):
     value = (raw or "").strip()
     if not value:
@@ -142,9 +146,9 @@ def normalize_channel_reference(raw: str):
     if re.fullmatch(r"-?\d+", value):
         return int(value), "chat_id"
 
-    lower_value = value.lower()
-    if lower_value.startswith("http://t.me/") or lower_value.startswith("https://t.me/"):
-        path = value.split("t.me/", 1)[-1].strip("/")
+    if re.search(r"^https?://t\.me/", value, re.IGNORECASE):
+        match = re.search(r"t\.me/(.+)$", value, re.IGNORECASE)
+        path = (match.group(1) if match else "").strip("/")
         if not path:
             raise ValueError("Invalid Telegram link.")
         first = path.split("/", 1)[0].strip()
@@ -163,7 +167,7 @@ def normalize_channel_reference(raw: str):
 async def resolve_fsub_channel(client: Client, raw_reference: str) -> dict:
     ref, ref_type = normalize_channel_reference(raw_reference)
     chat = await client.get_chat(ref)
-    if str(chat.type) not in ("channel", "supergroup"):
+    if not is_supported_fsub_chat_type(chat.type):
         raise ValueError("Only channels/supergroups are supported for FSub.")
 
     me = await client.get_me()
@@ -183,7 +187,7 @@ async def resolve_fsub_channel(client: Client, raw_reference: str) -> dict:
 async def create_fsub_invite_link(client: Client, channel_id: int, days: int = 0, member_limit: int = 0) -> str:
     expire_date = None
     if int(days) > 0:
-        expire_date = datetime.utcnow() + timedelta(days=int(days))
+        expire_date = datetime.now(timezone.utc) + timedelta(days=int(days))
 
     try:
         invite = await client.create_chat_invite_link(
@@ -206,7 +210,7 @@ async def list_bot_admin_channels(client: Client, limit: int = 30) -> list:
         chat = getattr(dialog, "chat", None)
         if not chat:
             continue
-        if str(chat.type) not in ("channel", "supergroup"):
+        if not is_supported_fsub_chat_type(chat.type):
             continue
         chat_id = int(chat.id)
         if chat_id in seen:
@@ -1467,7 +1471,7 @@ async def wizard_fsub_pick_admin_callback(client: Client, callback: CallbackQuer
     for ch in channels:
         buttons.append([
             InlineKeyboardButton(
-                f"📢 {ch['name'][:45]}",
+                f"📢 {ch['name'][:MAX_CHANNEL_NAME_DISPLAY_LENGTH]}",
                 callback_data=f"wiz_fsub_pick:{int(ch['id'])}"
             )
         ])
