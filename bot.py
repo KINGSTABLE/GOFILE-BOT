@@ -159,8 +159,8 @@ def normalize_channel_reference(raw: str):
     if value.startswith("@"):
         return value, "username"
 
-    # Telegram usernames: 4-32 chars, letters/numbers/underscore, must start with letter.
-    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,31}", value):
+    # Telegram usernames: 5-32 chars, letters/numbers/underscore, must start with letter.
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", value):
         return f"@{value}", "username"
 
     raise ValueError("Unsupported channel reference. Use chat ID, @username, or t.me link.")
@@ -1473,7 +1473,8 @@ async def wizard_fsub_pick_admin_callback(client: Client, callback: CallbackQuer
     buttons = []
     for ch in channels:
         name = ch["name"]
-        display_name = name[:MAX_CHANNEL_NAME_DISPLAY_LENGTH] + ("..." if len(name) > MAX_CHANNEL_NAME_DISPLAY_LENGTH else "")
+        is_truncated = len(name) > MAX_CHANNEL_NAME_DISPLAY_LENGTH
+        display_name = name[:MAX_CHANNEL_NAME_DISPLAY_LENGTH] + ("..." if is_truncated else "")
         buttons.append([
             InlineKeyboardButton(
                 f"📢 {display_name}",
@@ -2030,10 +2031,7 @@ async def admin_wizard_input_handler(client: Client, message: Message):
             member_limit = 0
             if text.lower() != "skip":
                 parts = text.split()
-                if not parts:
-                    await message.reply_text("❌ Use format: `days member_limit` or `skip`.")
-                    return
-                if len(parts) > 2:
+                if len(parts) == 0 or len(parts) > 2:
                     await message.reply_text("❌ Use format: `days member_limit` or `skip`.")
                     return
                 try:
