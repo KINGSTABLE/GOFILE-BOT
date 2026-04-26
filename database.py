@@ -51,7 +51,8 @@ class Database:
                 "last_revoked_at": "",
                 "last_revoked_user": 0
             },
-            "user_events": []
+            "user_events": [],
+            "admin_channels": []
         }
         
         if os.path.exists(self.db_file):
@@ -70,6 +71,8 @@ class Database:
                         loaded["bot_stats"]["last_username_export_at"] = ""
                     if "user_events" not in loaded:
                         loaded["user_events"] = []
+                    if "admin_channels" not in loaded:
+                        loaded["admin_channels"] = []
                     settings = loaded.get("settings", {})
                     if "enforcement_mode" not in settings:
                         settings["enforcement_mode"] = "normal"
@@ -367,8 +370,6 @@ class Database:
             await self._save_db()
     
     # ================== ADS MANAGEMENT ==================
-    
-    async def set_ads(self, enabled: bool, message: str = "", button_text: str = "", button_url: str = ""):
         """Set advertisement"""
         self.data["ads"] = {
             "enabled": enabled,
