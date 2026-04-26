@@ -10,7 +10,7 @@ import logging
 import uvloop
 import random
 from urllib.parse import urlsplit, urlunsplit
-from datetime import datetime
+from datetime import datetime, timedelta
 from pyrogram import Client, filters, idle
 from pyrogram.types import (
     InlineKeyboardMarkup, 
@@ -133,6 +133,111 @@ def is_valid_http_url(url: str) -> bool:
         return parsed.scheme in ("http", "https") and bool(parsed.netloc)
     except Exception:
         return False
+
+def normalize_channel_reference(raw: str):
+    value = (raw or "").strip()
+    if not value:
+        raise ValueError("Channel reference is empty.")
+
+    if re.fullmatch(r"-?\d+", value):
+        return int(value), "chat_id"
+
+    lower_value = value.lower()
+    if lower_value.startswith("http://t.me/") or lower_value.startswith("https://t.me/"):
+        path = value.split("t.me/", 1)[-1].strip("/")
+        if not path:
+            raise ValueError("Invalid Telegram link.")
+        first = path.split("/", 1)[0].strip()
+        if first.startswith("+") or first == "joinchat":
+            return value, "invite_link"
+        return f"@{first.lstrip('@')}", "username"
+
+    if value.startswith("@"):
+        return value, "username"
+
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,31}", value):
+        return f"@{value}", "username"
+
+    raise ValueError("Unsupported channel reference. Use chat ID, @username, or t.me link.")
+
+async def resolve_fsub_channel(client: Client, raw_reference: str) -> dict:
+    ref, ref_type = normalize_channel_reference(raw_reference)
+    chat = await client.get_chat(ref)
+    if str(chat.type) not in ("channel", "supergroup"):
+        raise ValueError("Only channels/supergroups are supported for FSub.")
+
+    me = await client.get_me()
+    member = await client.get_chat_member(chat.id, me.id)
+    member_status = getattr(member, "status", "")
+    is_admin = member_status in ("administrator", "creator")
+    return {
+        "id": int(chat.id),
+        "name": chat.title or f"Channel {chat.id}",
+        "input_type": ref_type,
+        "input_value": raw_reference,
+        "is_admin": is_admin,
+        "admin_error": "" if is_admin else "Bot must be admin in this channel to enforce FSub.",
+        "chat_invite_link": getattr(chat, "invite_link", "") or ""
+    }
+
+async def create_fsub_invite_link(client: Client, channel_id: int, days: int = 0, member_limit: int = 0) -> str:
+    expire_date = None
+    if int(days) > 0:
+        expire_date = datetime.utcnow() + timedelta(days=int(days))
+
+    try:
+        invite = await client.create_chat_invite_link(
+            channel_id,
+            expire_date=expire_date,
+            member_limit=int(member_limit) if int(member_limit) > 0 else None
+        )
+        return getattr(invite, "invite_link", "") or ""
+    except Exception:
+        try:
+            return await client.export_chat_invite_link(channel_id)
+        except Exception:
+            return ""
+
+async def list_bot_admin_channels(client: Client, limit: int = 30) -> list:
+    me = await client.get_me()
+    channels = []
+    seen = set()
+    async for dialog in client.get_dialogs(limit=200):
+        chat = getattr(dialog, "chat", None)
+        if not chat:
+            continue
+        if str(chat.type) not in ("channel", "supergroup"):
+            continue
+        chat_id = int(chat.id)
+        if chat_id in seen:
+            continue
+        seen.add(chat_id)
+        try:
+            member = await client.get_chat_member(chat_id, me.id)
+            if getattr(member, "status", "") in ("administrator", "creator"):
+                channels.append({
+                    "id": chat_id,
+                    "name": chat.title or f"Channel {chat_id}"
+                })
+        except Exception:
+            continue
+        if len(channels) >= int(limit):
+            break
+    return channels
+
+async def ensure_default_fsub_channel(client: Client):
+    target = (DEFAULT_FSUB_CHANNEL or "").strip()
+    if not target:
+        return
+    channels = await db.get_fsub_channels()
+    try:
+        resolved = await resolve_fsub_channel(client, target)
+    except Exception as e:
+        logger.warning(f"Could not resolve default FSUB channel {target}: {e}")
+        return
+    if any(int(ch.get("id", 0)) == int(resolved["id"]) for ch in channels):
+        return
+    await db.add_fsub_channel(resolved["id"], resolved["name"], "")
 
 async def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS or user_id == OWNER_ID
@@ -1125,38 +1230,53 @@ async def user_info_command(client: Client, message: Message):
 @admin_only
 async def add_fsub_command(client: Client, message: Message):
     """
-    Usage: /addfsub <channel_id> [channel_link]
-    Example: /addfsub -1001234567890 https://t.me/channel
+    Usage: /addfsub <channel_id|@username|invite_link> [days] [member_limit]
+    Example: /addfsub @TOOLS_BOTS_KING 7 100
     """
     args = message.text.split()[1:]
     
     if len(args) < 1:
         await message.reply_text(
             "📢 **Add Force Subscribe Channel**\n\n"
-            "**Usage:** `/addfsub <channel_id> [invite_link]`\n\n"
+            "**Usage:** `/addfsub <channel_ref> [days] [member_limit]`\n\n"
+            "Where `channel_ref` can be chat ID, @username, or invite link.\n\n"
             "**Examples:**\n"
             "• `/addfsub -1001234567890`\n"
-            "• `/addfsub -1001234567890 https://t.me/channel`\n\n"
-            "⚠️ Bot must be admin in the channel!"
+            "• `/addfsub @TOOLS_BOTS_KING`\n"
+            "• `/addfsub https://t.me/TOOLS_BOTS_KING 3 200`\n\n"
+            "⚠️ Bot must be admin in the channel for Force Sub."
         )
         return
-    
+
+    channel_ref = args[0]
+    days = 0
+    member_limit = 0
     try:
-        channel_id = int(args[0])
-    except ValueError:
-        await message.reply_text("❌ Invalid channel ID!")
+        if len(args) > 1:
+            days = max(0, int(args[1]))
+        if len(args) > 2:
+            member_limit = max(0, int(args[2]))
+        resolved = await resolve_fsub_channel(client, channel_ref)
+    except ValueError as e:
+        await message.reply_text(f"❌ {e}")
         return
-    
-    channel_link = args[1] if len(args) > 1 else ""
-    
-    # Try to get channel info
-    try:
-        chat = await client.get_chat(channel_id)
-        channel_name = chat.title
     except Exception as e:
-        await message.reply_text(f"⚠️ Could not fetch channel info: {e}\nAdding anyway...")
-        channel_name = f"Channel {channel_id}"
-    
+        await message.reply_text(f"❌ Could not resolve channel: {e}")
+        return
+
+    if not resolved.get("is_admin"):
+        await message.reply_text(
+            "❌ Bot is not admin in that channel.\n"
+            "Telegram requires admin rights to verify member status for Force Sub."
+        )
+        return
+
+    channel_id = int(resolved["id"])
+    channel_name = resolved["name"]
+    channel_link = await create_fsub_invite_link(client, channel_id, days=days, member_limit=member_limit)
+    if not channel_link:
+        channel_link = resolved.get("chat_invite_link", "")
+
     success = await db.add_fsub_channel(channel_id, channel_name, channel_link)
     
     if success:
@@ -1165,7 +1285,9 @@ async def add_fsub_command(client: Client, message: Message):
             f"✅ **Channel Added!**\n\n"
             f"📢 **Name:** {channel_name}\n"
             f"🆔 **ID:** `{channel_id}`\n"
-            f"🔗 **Link:** {channel_link or 'Auto-generated'}"
+            f"🔗 **Invite:** {channel_link or 'Auto (not available)'}\n"
+            f"⏳ **Expiry Days:** `{days}`\n"
+            f"👥 **Join Limit:** `{member_limit}`"
         )
     else:
         await message.reply_text("❌ Channel already exists!")
@@ -1204,7 +1326,7 @@ async def fsub_list_command(client: Client, message: Message):
             "📢 **Force Subscribe Channels**\n\n"
             "❌ No channels configured!\n\n"
             "**Add channels using:**\n"
-            "`/addfsub <channel_id> [link]`"
+            "`/addfsub <channel_ref> [days] [member_limit]`"
         )
         return
     
@@ -1254,7 +1376,8 @@ async def admin_fsub_callback(client: Client, callback: CallbackQuery):
         f"• Checks: `{enforcement['checks']}` | Fails: `{enforcement['failed_checks']}` | Revoked: `{enforcement['revoked_access']}`\n"
         f"• Channels: `{total}`\n\n"
         "**What this does:**\n"
-        "• Keeps non-admin users in required channels before bot usage.\n\n"
+        "• Keeps non-admin users in required channels before bot usage.\n"
+        "• Bot must be admin in FSUB channels to verify members and generate invite links.\n\n"
     )
     if chunk:
         text += "**Configured channels:**\n"
@@ -1321,13 +1444,68 @@ async def fsub_recheck_now_callback(client: Client, callback: CallbackQuery):
 @app.on_callback_query(filters.regex("^wiz_fsub_start$"))
 @admin_only
 async def wizard_fsub_start_callback(client: Client, callback: CallbackQuery):
-    set_admin_wizard_state(callback.from_user.id, "fsub", "await_channel_id", {})
+    set_admin_wizard_state(callback.from_user.id, "fsub", "await_channel_ref", {})
     await callback.message.edit_text(
         "🔐 **FSub Setup Wizard**\n\n"
-        "**Step 1/3:** Send channel ID now (example: `-1001234567890`).",
+        "**Step 1/3:** Send channel reference now.\n"
+        "Accepted: `-100...` chat ID, `@username`, or `https://t.me/...` link.",
         reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 Pick from Bot Admin Channels", callback_data="wiz_fsub_pick_admin")],
             [InlineKeyboardButton("❌ Cancel", callback_data="wiz_cancel")],
             [InlineKeyboardButton("🔙 Back", callback_data="admin_fsub:0")]
+        ])
+    )
+
+@app.on_callback_query(filters.regex("^wiz_fsub_pick_admin$"))
+@admin_only
+async def wizard_fsub_pick_admin_callback(client: Client, callback: CallbackQuery):
+    channels = await list_bot_admin_channels(client, limit=20)
+    if not channels:
+        await callback.answer("No admin channels found for this bot.", show_alert=True)
+        return
+    buttons = []
+    for ch in channels:
+        buttons.append([
+            InlineKeyboardButton(
+                f"📢 {ch['name'][:45]}",
+                callback_data=f"wiz_fsub_pick:{int(ch['id'])}"
+            )
+        ])
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="wiz_fsub_start")])
+    await callback.message.edit_text(
+        "📋 **Pick a Channel**\n\nThese are channels where bot is currently admin:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+@app.on_callback_query(filters.regex(r"^wiz_fsub_pick:\-?\d+$"))
+@admin_only
+async def wizard_fsub_pick_channel_callback(client: Client, callback: CallbackQuery):
+    channel_id = int(callback.data.split(":")[1])
+    try:
+        chat = await client.get_chat(channel_id)
+    except Exception as e:
+        await callback.answer(f"Could not open channel: {e}", show_alert=True)
+        return
+    set_admin_wizard_state(
+        callback.from_user.id,
+        "fsub",
+        "await_invite_settings",
+        {
+            "channel_id": int(chat.id),
+            "channel_name": chat.title or f"Channel {chat.id}",
+            "input_type": "picker"
+        }
+    )
+    await callback.message.edit_text(
+        "🔗 **Invite Link Options**\n\n"
+        "Step 2/3: Send `days member_limit`.\n"
+        "Examples:\n"
+        "• `7 100` (expires in 7 days, max 100 joins)\n"
+        "• `0 0` (no expiry/no limit)\n"
+        "• `skip` (auto defaults)",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="wiz_cancel")],
+            [InlineKeyboardButton("🔙 Back", callback_data="wiz_fsub_start")]
         ])
     )
 
@@ -1545,7 +1723,7 @@ async def admin_setup_checks_callback(client: Client, callback: CallbackQuery):
         ("WEB_BASE_URL", bool(WEB_BASE_URL), "Needed for web dashboard links."),
         ("ADMIN_DASHBOARD_TOKEN", bool(ADMIN_DASHBOARD_TOKEN), "Needed for secure dashboard access."),
         ("SUPPORT_CHAT", bool(SUPPORT_CHAT), "Recommended for user help routing."),
-        ("REQUIRED_FSUB_CHANNELS", len(REQUIRED_FSUB_CHANNELS) > 0, "Required channels should be set clearly.")
+        ("DEFAULT_FSUB_CHANNEL", bool(DEFAULT_FSUB_CHANNEL), "Default channel is auto-seeded for FSub.")
     ]
     lines = []
     for name, ok, note in checks:
@@ -1807,47 +1985,75 @@ async def admin_wizard_input_handler(client: Client, message: Message):
 
     if flow == "fsub":
         text = (message.text or message.caption or "").strip()
-        if step == "await_channel_id":
+        if step == "await_channel_ref":
             try:
-                channel_id = int(text)
-            except ValueError:
-                await message.reply_text("❌ Invalid channel ID. Send a numeric ID like `-100...`.")
-                return
-            channel_name = f"Channel {channel_id}"
-            try:
-                chat = await client.get_chat(channel_id)
-                channel_name = chat.title or channel_name
-            except Exception:
-                pass
-            set_admin_wizard_state(message.from_user.id, "fsub", "await_channel_link", {"channel_id": channel_id, "channel_name": channel_name})
-            await message.reply_text("Step 2/3: Send invite link or type `skip`.")
-            return
-        if step == "await_channel_link":
-            channel_link = "" if text.lower() == "skip" else text
-            channel_id = int(data["channel_id"])
-            verified = True
-            verify_error = ""
-            try:
-                me = await client.get_me()
-                member = await client.get_chat_member(channel_id, me.id)
-                member_status = getattr(member, "status", "")
-                if member_status not in ("administrator", "creator"):
-                    verified = False
-                    verify_error = "Bot must be administrator or creator in this channel."
+                resolved = await resolve_fsub_channel(client, text)
             except Exception as e:
-                verified = False
-                verify_error = str(e)
-            preview_data = {**data, "channel_link": channel_link, "verified": verified, "verify_error": verify_error}
+                await message.reply_text(
+                    f"❌ {e}\n\nSend a valid chat ID, @username, or t.me link."
+                )
+                return
+            if not resolved.get("is_admin"):
+                await message.reply_text(
+                    "❌ Bot is not admin in this channel.\n"
+                    "Force Sub requires bot admin rights to check membership."
+                )
+                return
+            set_admin_wizard_state(
+                message.from_user.id,
+                "fsub",
+                "await_invite_settings",
+                {
+                    "channel_id": int(resolved["id"]),
+                    "channel_name": resolved["name"],
+                    "input_type": resolved.get("input_type", "unknown"),
+                    "input_value": resolved.get("input_value", text),
+                    "chat_invite_link": resolved.get("chat_invite_link", "")
+                }
+            )
+            await message.reply_text(
+                "🔗 Step 2/3: Send invite settings as `days member_limit`.\n"
+                "Examples: `7 100`, `0 0`, or `skip`."
+            )
+            return
+        if step == "await_invite_settings":
+            days = 0
+            member_limit = 0
+            if text.lower() != "skip":
+                parts = text.split()
+                if len(parts) > 2:
+                    await message.reply_text("❌ Use format: `days member_limit` or `skip`.")
+                    return
+                try:
+                    days = max(0, int(parts[0])) if len(parts) >= 1 else 0
+                    member_limit = max(0, int(parts[1])) if len(parts) == 2 else 0
+                except ValueError:
+                    await message.reply_text("❌ Days/member_limit must be numeric.")
+                    return
+            channel_id = int(data["channel_id"])
+            channel_link = await create_fsub_invite_link(client, channel_id, days=days, member_limit=member_limit)
+            if not channel_link:
+                channel_link = data.get("chat_invite_link", "")
+            preview_data = {
+                **data,
+                "channel_link": channel_link,
+                "invite_days": days,
+                "invite_member_limit": member_limit,
+                "verified": True,
+                "verify_error": ""
+            }
             set_admin_wizard_state(message.from_user.id, "fsub", "preview", preview_data)
             await message.reply_text(
                 "🔐 **FSub Preview**\n\n"
                 f"📢 {preview_data.get('channel_name')}\n"
                 f"🆔 `{preview_data.get('channel_id')}`\n"
-                f"🔗 {preview_data.get('channel_link') or 'Auto'}\n"
-                f"✅ Verify: {'Passed' if verified else 'Failed'}\n"
-                f"{'⚠️ ' + verify_error if verify_error else ''}",
+                f"🔎 Input: `{preview_data.get('input_type', 'manual')}`\n"
+                f"🔗 Invite: {preview_data.get('channel_link') or 'Auto (not available)'}\n"
+                f"⏳ Expiry Days: `{preview_data.get('invite_days', 0)}`\n"
+                f"👥 Join Limit: `{preview_data.get('invite_member_limit', 0)}`\n"
+                "✅ Verify: Passed",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Save Anyway", callback_data="wiz_fsub_save")],
+                    [InlineKeyboardButton("✅ Save", callback_data="wiz_fsub_save")],
                     [InlineKeyboardButton("❌ Cancel", callback_data="wiz_cancel")]
                 ])
             )
@@ -1865,7 +2071,7 @@ async def admin_stats_detail_callback(client: Client, callback: CallbackQuery):
         f"👥 **Total Users:** {stats['total_users']}\n"
         f"🚫 **Banned Users:** {stats['banned_users']}\n"
         f"📢 **FSub Channels:** {stats['fsub_channels']}\n"
-        f"🔐 **Required Channels:** {', '.join(str(x) for x in REQUIRED_FSUB_CHANNELS)}\n"
+        f"🔐 **Default FSub Seed:** {DEFAULT_FSUB_CHANNEL or 'Not set'}\n"
         f"🛡 **Enforcement Mode:** {stats.get('enforcement_mode', 'normal').upper()}\n"
         f"🔎 **Checks / Fails / Revoked:** {enforcement.get('checks', 0)} / {enforcement.get('failed_checks', 0)} / {enforcement.get('revoked_access', 0)}\n"
         f"📤 **Total Uploads:** {stats['total_uploads']}\n"
@@ -2421,9 +2627,9 @@ async def start_web():
 async def main():
     global shutdown_in_progress
     print("🤖 Bot Starting with uvloop optimization...")
-    await db.ensure_required_fsub_channels()
     await db.get_username_export_file_path()
     await app.start()
+    await ensure_default_fsub_channel(app)
     for i in range(MAX_CONCURRENT_QUEUE_WORKERS):
         queue_worker_tasks.append(asyncio.create_task(queue_worker(app, i)))
     print(f"⚙️ Started {MAX_CONCURRENT_QUEUE_WORKERS} concurrent queue workers.")
