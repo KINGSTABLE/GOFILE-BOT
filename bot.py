@@ -59,6 +59,14 @@ download_queue = Queue()
 MAX_CONCURRENT_QUEUE_WORKERS = 10
 queue_worker_tasks = []
 shutdown_in_progress = False
+ADMIN_WIZARDS = {}
+ACTION_UNDO = {}
+LIST_PAGE_SIZE = 10
+ADMIN_TEXT_COMMANDS = [
+    "start", "help", "stats", "ping", "about", "analytics", "usernamefile", "broadcast",
+    "users", "ban", "unban", "banned", "user", "addfsub", "remfsub", "fsub", "setad",
+    "delad", "togglead", "maintenance", "setwelcome", "resetwelcome", "export"
+]
 
 # ================== HELPER FUNCTIONS ==================
 
@@ -71,6 +79,60 @@ def human_readable_size(size):
 
 def get_current_time():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def format_bool_badge(value: bool) -> str:
+    return "🟢 ON" if value else "🔴 OFF"
+
+def get_admin_wizard_state(admin_id: int) -> dict:
+    return ADMIN_WIZARDS.get(int(admin_id), {})
+
+def set_admin_wizard_state(admin_id: int, flow: str, step: str, data: dict = None):
+    ADMIN_WIZARDS[int(admin_id)] = {
+        "flow": flow,
+        "step": step,
+        "data": data or {},
+        "updated_at": int(time.time())
+    }
+
+def clear_admin_wizard_state(admin_id: int):
+    ADMIN_WIZARDS.pop(int(admin_id), None)
+
+def put_undo_action(admin_id: int, action_key: str, payload: dict, ttl_seconds: int = 120):
+    ACTION_UNDO[f"{int(admin_id)}:{action_key}"] = {
+        "payload": payload,
+        "expires_at": int(time.time()) + max(30, int(ttl_seconds))
+    }
+
+def get_undo_action(admin_id: int, action_key: str):
+    key = f"{int(admin_id)}:{action_key}"
+    action = ACTION_UNDO.get(key)
+    if not action:
+        return None
+    if int(time.time()) > int(action.get("expires_at", 0)):
+        ACTION_UNDO.pop(key, None)
+        return None
+    return action.get("payload")
+
+def consume_undo_action(admin_id: int, action_key: str):
+    key = f"{int(admin_id)}:{action_key}"
+    action = get_undo_action(admin_id, action_key)
+    ACTION_UNDO.pop(key, None)
+    return action
+
+async def log_admin_action(user_id: int, action: str, metadata: dict = None):
+    await db.log_user_event(
+        user_id,
+        "admin_action",
+        chat_id=user_id,  # admin actions are logged from private-chat admin workflows
+        metadata={"action": action, **(metadata or {})}
+    )
+
+def is_valid_http_url(url: str) -> bool:
+    try:
+        parsed = urlsplit((url or "").strip())
+        return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    except Exception:
+        return False
 
 async def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS or user_id == OWNER_ID
@@ -222,9 +284,28 @@ async def force_sub_check(client: Client, message: Message) -> bool:
             return False
 
         # Check force subscribe
+        enforcement_mode = await db.get_enforcement_mode()
         is_subscribed, missing_channels = await check_force_sub(client, user_id)
+        is_revoked = (not is_subscribed and enforcement_mode == "aggressive")
+        await db.record_enforcement_check(
+            passed=is_subscribed,
+            revoked=is_revoked,
+            user_id=user_id,
+            persist=False
+        )
 
         if not is_subscribed:
+            if enforcement_mode == "aggressive":
+                await db.log_user_event(
+                    user_id,
+                    "enforcement_revoked",
+                    chat_id=chat_id,
+                    metadata={
+                        "reason": "missing_required_channels",
+                        "missing_count": len(missing_channels)
+                    },
+                    persist=False
+                )
             invite_links = await get_invite_links(client, missing_channels)
             keyboard = get_fsub_keyboard(missing_channels, invite_links)
             await message.reply_text(
@@ -494,30 +575,42 @@ async def about_command(client: Client, message: Message):
 @admin_only
 async def admin_panel_callback(client: Client, callback: CallbackQuery):
     bot_stats = await db.get_bot_stats()
-    
+    ads = await db.get_ads()
+    maintenance = await db.is_maintenance()
+    enforcement = await db.get_enforcement_stats()
+
     admin_text = (
-        "👑 **Admin Control Panel**\n\n"
-        f"👥 **Total Users:** {bot_stats['total_users']}\n"
-        f"🚫 **Banned Users:** {bot_stats['banned_users']}\n"
-        f"📢 **FSub Channels:** {bot_stats['fsub_channels']}\n"
-        f"📤 **Total Uploads:** {bot_stats['total_uploads']}\n"
-        f"💾 **Data Processed:** {human_readable_size(bot_stats['total_size'])}"
+        "👑 **Admin Control Center**\n\n"
+        "**System Status**\n"
+        f"• Maintenance: {format_bool_badge(maintenance)}\n"
+        f"• Ads: {format_bool_badge(ads.get('enabled', False))}\n"
+        f"• Enforcement: {'🛡 Aggressive' if enforcement['mode'] == 'aggressive' else '✅ Normal'}\n\n"
+        "**Core Metrics**\n"
+        f"• Users: `{bot_stats['total_users']}`\n"
+        f"• Banned: `{bot_stats['banned_users']}`\n"
+        f"• FSub Channels: `{bot_stats['fsub_channels']}`\n"
+        f"• Uploads: `{bot_stats['total_uploads']}`\n"
+        f"• Data: `{human_readable_size(bot_stats['total_size'])}`\n\n"
+        "_Choose a section below._"
     )
     
     buttons = [
         [
             InlineKeyboardButton("👥 Users", callback_data="admin_users"),
-            InlineKeyboardButton("📢 FSub", callback_data="admin_fsub")
+            InlineKeyboardButton("🔐 FSub & Access", callback_data="admin_fsub:0")
         ],
         [
-            InlineKeyboardButton("📡 Broadcast", callback_data="admin_broadcast"),
-            InlineKeyboardButton("📣 Ads", callback_data="admin_ads")
+            InlineKeyboardButton("📡 Broadcast Wizard", callback_data="admin_broadcast"),
+            InlineKeyboardButton("📣 Ads Wizard", callback_data="admin_ads_wizard")
         ],
         [
-            InlineKeyboardButton("🔧 Settings", callback_data="admin_settings"),
+            InlineKeyboardButton("🔧 Settings Wizard", callback_data="admin_settings"),
             InlineKeyboardButton("📊 Stats", callback_data="admin_stats_detail")
         ],
-        [InlineKeyboardButton("📈 Analytics", callback_data="admin_analytics")],
+        [
+            InlineKeyboardButton("📈 Analytics", callback_data="admin_analytics"),
+            InlineKeyboardButton("🛡 Safety Logs", callback_data="admin_safety_logs:0")
+        ],
         [InlineKeyboardButton("🧭 Admin Guide", callback_data="admin_guide")],
         [InlineKeyboardButton("🔙 Back", callback_data="go_start")]
     ]
@@ -529,25 +622,23 @@ async def admin_panel_callback(client: Client, callback: CallbackQuery):
 async def admin_guide_callback(client: Client, callback: CallbackQuery):
     text = (
         "🧭 **Admin Guidance**\n\n"
-        "**User & Access:**\n"
-        "• `/users` - User counts and moderation shortcuts\n"
-        "• `/ban <id>` / `/unban <id>` - Manage abuse\n"
-        "• `/user <id>` - Inspect user profile\n\n"
-        "**Force Subscribe:**\n"
-        "• `/fsub` - View channels\n"
-        "• `/addfsub <id> [link]` - Add a channel\n"
-        "• `/remfsub <id>` - Remove a channel\n"
-        "• Required channels are always enforced for non-admins\n\n"
-        "**Broadcast & Ads:**\n"
-        "• `/broadcast` (+ `-f`, `-p`) - Message all users\n"
-        "• `/setad` / `/togglead` / `/delad` - Sponsor controls\n\n"
-        "**Ops & Analytics:**\n"
-        "• `/maintenance on|off` - Maintenance mode\n"
-        "• `/setwelcome` / `/resetwelcome` - Welcome text\n"
-        "• `/analytics` - Daily/weekly/monthly/yearly usage panel\n"
-        "• `/usernamefile` - Download latest username_{totalusername}.txt"
+        "**What this panel does**\n"
+        "• Gives guided admin workflows with confirmation steps.\n"
+        "• Keeps risky actions protected by confirm/undo.\n"
+        "• Shows health, analytics, and safety logs in one place.\n\n"
+        "**Recommended usage**\n"
+        "1) Configure **FSub & Access** first.\n"
+        "2) Enable **Aggressive Enforcement** only after setup check passes.\n"
+        "3) Use **Broadcast Wizard** for previews/dry-runs before send.\n"
+        "4) Use **Safety Logs** daily for revocations/admin actions.\n\n"
+        "**Fallback commands**\n"
+        "• `/ban`, `/unban`, `/addfsub`, `/remfsub`, `/setad`, `/maintenance`\n"
+        "• `/analytics`, `/usernamefile`, `/export`"
     )
-    buttons = [[InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]]
+    buttons = [
+        [InlineKeyboardButton("👑 Admin Home", callback_data="admin_panel")],
+        [InlineKeyboardButton("🔙 Back", callback_data="go_start")]
+    ]
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 # ================== ADMIN COMMANDS ==================
@@ -583,17 +674,130 @@ async def broadcast_command(client: Client, message: Message):
 @app.on_callback_query(filters.regex("^admin_broadcast$"))
 @admin_only
 async def admin_broadcast_callback(client: Client, callback: CallbackQuery):
+    clear_admin_wizard_state(callback.from_user.id)
     text = (
-        "📡 **Broadcast System**\n\n"
-        "**Commands:**\n"
-        "• `/broadcast` - Reply to message to broadcast\n"
-        "• `/broadcast -f` - Forward instead of copy\n"
-        "• `/broadcast -p` - Copy & pin message\n\n"
-        "⚠️ Broadcasts may take time based on user count."
+        "📡 **Broadcast Wizard**\n\n"
+        "**What this does:**\n"
+        "• Send one message to all users with guided confirmations.\n\n"
+        "**Step 1/3:** Choose delivery mode."
     )
-    
-    buttons = [[InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]]
+
+    buttons = [
+        [
+            InlineKeyboardButton("📄 Copy", callback_data="wiz_broadcast_mode:copy"),
+            InlineKeyboardButton("↪️ Forward", callback_data="wiz_broadcast_mode:forward")
+        ],
+        [InlineKeyboardButton("📌 Copy + Pin", callback_data="wiz_broadcast_mode:pin")],
+        [InlineKeyboardButton("🧭 Guide", callback_data="admin_guide")],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]
+    ]
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+@app.on_callback_query(filters.regex("^wiz_broadcast_mode:(copy|forward|pin)$"))
+@admin_only
+async def wizard_broadcast_mode_callback(client: Client, callback: CallbackQuery):
+    mode = callback.data.split(":")[1]
+    mode_data = {
+        "copy": {"forward": False, "pin": False, "label": "📄 Copy"},
+        "forward": {"forward": True, "pin": False, "label": "↪️ Forward"},
+        "pin": {"forward": False, "pin": True, "label": "📌 Copy + Pin"}
+    }[mode]
+    set_admin_wizard_state(callback.from_user.id, "broadcast", "await_content", mode_data)
+    await callback.message.edit_text(
+        "📡 **Broadcast Wizard**\n\n"
+        f"**Mode:** {mode_data['label']}\n"
+        "**Step 2/3:** Send the message (text/media) you want to broadcast.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="wiz_cancel")],
+            [InlineKeyboardButton("🔙 Back", callback_data="admin_broadcast")]
+        ])
+    )
+
+@app.on_callback_query(filters.regex("^wiz_broadcast_preview$"))
+@admin_only
+async def wizard_broadcast_preview_callback(client: Client, callback: CallbackQuery):
+    state = get_admin_wizard_state(callback.from_user.id)
+    data = state.get("data", {})
+    source_chat = data.get("source_chat")
+    source_message = data.get("source_message")
+    if state.get("flow") != "broadcast" or state.get("step") != "preview" or not source_message:
+        await callback.answer("No pending broadcast draft found.", show_alert=True)
+        return
+    try:
+        msg = await client.get_messages(source_chat, source_message)
+        if not msg:
+            raise ValueError("message unavailable")
+        if data.get("forward"):
+            await msg.forward(callback.from_user.id)
+        else:
+            await msg.copy(callback.from_user.id)
+        await callback.answer("Preview delivered to your chat.")
+    except Exception as e:
+        logger.error(f"Broadcast preview failed: {e}")
+        await callback.answer("Preview failed. Send draft again.", show_alert=True)
+
+@app.on_callback_query(filters.regex("^wiz_broadcast_confirm$"))
+@admin_only
+async def wizard_broadcast_confirm_callback(client: Client, callback: CallbackQuery):
+    state = get_admin_wizard_state(callback.from_user.id)
+    data = state.get("data", {})
+    source_chat = data.get("source_chat")
+    source_message = data.get("source_message")
+    if state.get("flow") != "broadcast" or state.get("step") != "preview" or not source_message:
+        await callback.answer("No pending broadcast found.", show_alert=True)
+        return
+    try:
+        source_msg = await client.get_messages(source_chat, source_message)
+        if not source_msg:
+            raise ValueError("source message not found")
+        status_msg = await callback.message.reply_text("📡 Starting broadcast to all users...")
+        stats = await broadcast_message(
+            client,
+            source_msg,
+            status_msg,
+            forward=bool(data.get("forward")),
+            pin=bool(data.get("pin"))
+        )
+        clear_admin_wizard_state(callback.from_user.id)
+        await log_admin_action(
+            callback.from_user.id,
+            "broadcast_sent",
+            {
+                "success": stats.success,
+                "failed": stats.failed,
+                "blocked": stats.blocked,
+                "deleted": stats.deleted,
+                "total": stats.total
+            }
+        )
+        await db.log_user_event(
+            callback.from_user.id,
+            "broadcast_report",
+            chat_id=callback.from_user.id,
+            metadata={
+                "success": stats.success,
+                "failed": stats.failed,
+                "blocked": stats.blocked,
+                "deleted": stats.deleted,
+                "total": stats.total
+            }
+        )
+        await callback.message.edit_text(
+            "✅ **Broadcast Finished**\n\n"
+            f"👥 Total: `{stats.total}`\n"
+            f"✅ Success: `{stats.success}`\n"
+            f"❌ Failed: `{stats.failed}`\n"
+            f"🚫 Blocked: `{stats.blocked}`\n"
+            f"👻 Deleted: `{stats.deleted}`",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📡 New Broadcast", callback_data="admin_broadcast")],
+                [InlineKeyboardButton("🛡 Safety Logs", callback_data="admin_safety_logs:0")],
+                [InlineKeyboardButton("🔙 Admin Home", callback_data="admin_panel")]
+            ])
+        )
+    except Exception as e:
+        logger.error(f"Broadcast execution failed: {e}")
+        await callback.answer("Broadcast failed. Try again.", show_alert=True)
 
 # ----- USERS MANAGEMENT -----
 async def generate_users_export_file() -> tuple[str, int]:
@@ -670,22 +874,21 @@ async def admin_users_callback(client: Client, callback: CallbackQuery):
     stats = await db.get_bot_stats()
     
     text = (
-        f"👥 **User Management**\n\n"
-        f"📊 **Total Users:** {stats['total_users']}\n"
-        f"🚫 **Banned Users:** {stats['banned_users']}\n\n"
-        f"**Commands:**\n"
-        f"• `/ban <user_id>` - Ban user\n"
-        f"• `/unban <user_id>` - Unban user\n"
-        f"• `/user <user_id>` - User info\n"
-        f"• `/banned` - List banned users\n"
-        f"• `/export` - Export user list"
+        "👥 **User Management**\n\n"
+        f"• Total Users: `{stats['total_users']}`\n"
+        f"• Banned Users: `{stats['banned_users']}`\n\n"
+        "**What this does:**\n"
+        "• Moderate abuse and inspect user records.\n\n"
+        "**Recommended usage:**\n"
+        "• Use button actions first, commands as fallback."
     )
     
     buttons = [
         [
             InlineKeyboardButton("📋 Export Users", callback_data="export_users"),
-            InlineKeyboardButton("🚫 Banned List", callback_data="banned_list")
+            InlineKeyboardButton("🚫 Banned List", callback_data="banned_list:0")
         ],
+        [InlineKeyboardButton("🧭 Guide", callback_data="admin_guide")],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]
     ]
     
@@ -715,20 +918,41 @@ async def export_users_callback(client: Client, callback: CallbackQuery):
             except OSError as cleanup_error:
                 logger.warning(f"Failed to remove export file {export_path}: {cleanup_error}")
 
-@app.on_callback_query(filters.regex("^banned_list$"))
+@app.on_callback_query(filters.regex(r"^banned_list(?::\d+)?$"))
 @admin_only
 async def banned_list_callback(client: Client, callback: CallbackQuery):
     banned = await db.get_banned_users()
+    page = 0
+    if ":" in callback.data:
+        try:
+            page = max(0, int(callback.data.split(":")[1]))
+        except ValueError:
+            page = 0
 
     if not banned:
         text = "✅ No banned users!"
+        buttons = [[InlineKeyboardButton("🔙 Back", callback_data="admin_users")]]
     else:
-        banned_lines = [f"• `{strip_markdown_formatting(str(user_id))}`" for user_id in banned[:50]]
-        text = "🚫 **Banned Users:**\n\n" + "\n".join(banned_lines)
-        if len(banned) > 50:
-            text += f"\n_...and {len(banned) - 50} more_"
-
-    buttons = [[InlineKeyboardButton("🔙 Back", callback_data="admin_users")]]
+        total = len(banned)
+        start = page * LIST_PAGE_SIZE
+        end = start + LIST_PAGE_SIZE
+        chunk = banned[start:end]
+        total_pages = max(1, (total + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+        banned_lines = [f"• `{strip_markdown_formatting(str(user_id))}`" for user_id in chunk]
+        text = (
+            "🚫 **Banned Users**\n\n"
+            f"{'\n'.join(banned_lines)}\n\n"
+            f"_Page {page + 1}/{total_pages} • Total {total}_"
+        )
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"banned_list:{page-1}"))
+        if end < total:
+            nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"banned_list:{page+1}"))
+        buttons = []
+        if nav:
+            buttons.append(nav)
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_users")])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 @app.on_message(filters.command("ban") & filters.private)
@@ -747,9 +971,16 @@ async def ban_command(client: Client, message: Message):
     if user_id in ADMIN_IDS or user_id == OWNER_ID:
         await message.reply_text("❌ Cannot ban admins!")
         return
-    
-    await db.ban_user(user_id)
-    await message.reply_text(f"✅ User `{user_id}` has been **banned**!")
+
+    await message.reply_text(
+        f"⚠️ **Confirm Ban**\n\nBan user `{user_id}`?",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Confirm", callback_data=f"confirm_ban:{user_id}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="admin_users")
+            ]
+        ])
+    )
 
 @app.on_message(filters.command("unban") & filters.private)
 @admin_only
@@ -764,8 +995,15 @@ async def unban_command(client: Client, message: Message):
         await message.reply_text("❌ Invalid user ID!")
         return
     
-    await db.unban_user(user_id)
-    await message.reply_text(f"✅ User `{user_id}` has been **unbanned**!")
+    await message.reply_text(
+        f"⚠️ **Confirm Unban**\n\nUnban user `{user_id}`?",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Confirm", callback_data=f"confirm_unban:{user_id}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="admin_users")
+            ]
+        ])
+    )
 
 @app.on_message(filters.command("banned") & filters.private)
 @admin_only
@@ -784,6 +1022,69 @@ async def banned_list_command(client: Client, message: Message):
         text += f"\n_...and {len(banned) - 50} more_"
     
     await message.reply_text(text)
+
+@app.on_callback_query(filters.regex(r"^confirm_ban:\-?\d+$"))
+@admin_only
+async def confirm_ban_callback(client: Client, callback: CallbackQuery):
+    user_id = int(callback.data.split(":")[1])
+    if user_id in ADMIN_IDS or user_id == OWNER_ID:
+        await callback.answer("Cannot ban admins.", show_alert=True)
+        return
+    await db.ban_user(user_id)
+    put_undo_action(callback.from_user.id, f"ban:{user_id}", {"user_id": user_id}, ttl_seconds=120)
+    await log_admin_action(callback.from_user.id, "ban_user", {"target_user": user_id})
+    await callback.message.edit_text(
+        f"✅ User `{user_id}` banned.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("↩️ Undo (2m)", callback_data=f"undo_ban:{user_id}")],
+            [InlineKeyboardButton("🔙 Back", callback_data="admin_users")]
+        ])
+    )
+
+@app.on_callback_query(filters.regex(r"^undo_ban:\-?\d+$"))
+@admin_only
+async def undo_ban_callback(client: Client, callback: CallbackQuery):
+    user_id = int(callback.data.split(":")[1])
+    action = consume_undo_action(callback.from_user.id, f"ban:{user_id}")
+    if not action:
+        await callback.answer("Undo expired or unavailable.", show_alert=True)
+        return
+    await db.unban_user(user_id)
+    await log_admin_action(callback.from_user.id, "undo_ban", {"target_user": user_id})
+    await callback.message.edit_text(
+        f"✅ Ban reverted for `{user_id}`.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_users")]])
+    )
+
+@app.on_callback_query(filters.regex(r"^confirm_unban:\-?\d+$"))
+@admin_only
+async def confirm_unban_callback(client: Client, callback: CallbackQuery):
+    user_id = int(callback.data.split(":")[1])
+    await db.unban_user(user_id)
+    put_undo_action(callback.from_user.id, f"unban:{user_id}", {"user_id": user_id}, ttl_seconds=120)
+    await log_admin_action(callback.from_user.id, "unban_user", {"target_user": user_id})
+    await callback.message.edit_text(
+        f"✅ User `{user_id}` unbanned.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("↩️ Undo (2m)", callback_data=f"undo_unban:{user_id}")],
+            [InlineKeyboardButton("🔙 Back", callback_data="admin_users")]
+        ])
+    )
+
+@app.on_callback_query(filters.regex(r"^undo_unban:\-?\d+$"))
+@admin_only
+async def undo_unban_callback(client: Client, callback: CallbackQuery):
+    user_id = int(callback.data.split(":")[1])
+    action = consume_undo_action(callback.from_user.id, f"unban:{user_id}")
+    if not action:
+        await callback.answer("Undo expired or unavailable.", show_alert=True)
+        return
+    await db.ban_user(user_id)
+    await log_admin_action(callback.from_user.id, "undo_unban", {"target_user": user_id})
+    await callback.message.edit_text(
+        f"✅ Unban reverted for `{user_id}`.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_users")]])
+    )
 
 @app.on_message(filters.command("user") & filters.private)
 @admin_only
@@ -859,6 +1160,7 @@ async def add_fsub_command(client: Client, message: Message):
     success = await db.add_fsub_channel(channel_id, channel_name, channel_link)
     
     if success:
+        await log_admin_action(message.from_user.id, "add_fsub_channel", {"channel_id": channel_id})
         await message.reply_text(
             f"✅ **Channel Added!**\n\n"
             f"📢 **Name:** {channel_name}\n"
@@ -880,13 +1182,16 @@ async def remove_fsub_command(client: Client, message: Message):
     except ValueError:
         await message.reply_text("❌ Invalid channel ID!")
         return
-    
-    success = await db.remove_fsub_channel(channel_id)
-    
-    if success:
-        await message.reply_text(f"✅ Channel `{channel_id}` removed from FSub!")
-    else:
-        await message.reply_text("❌ Channel not found in FSub list!")
+
+    await message.reply_text(
+        f"⚠️ **Confirm Removal**\n\nRemove FSub channel `{channel_id}`?",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Confirm", callback_data=f"confirm_remfsub:{channel_id}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="admin_fsub:0")
+            ]
+        ])
+    )
 
 @app.on_message(filters.command("fsub") & filters.private)
 @admin_only
@@ -924,36 +1229,64 @@ async def fsub_list_command(client: Client, message: Message):
     
     await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
-@app.on_callback_query(filters.regex("^admin_fsub$"))
+@app.on_callback_query(filters.regex(r"^admin_fsub(?::\d+)?$"))
 @admin_only
 async def admin_fsub_callback(client: Client, callback: CallbackQuery):
     channels = await db.get_fsub_channels()
     is_enabled = await db.is_fsub_enabled()
-    
-    text = f"📢 **Force Subscribe Management**\n\n"
-    text += f"**Status:** {'🟢 Enabled' if is_enabled else '🔴 Disabled'}\n"
-    text += f"**Channels:** {len(channels)}\n\n"
-    
-    if channels:
-        for i, ch in enumerate(channels, 1):
+    enforcement = await db.get_enforcement_stats()
+    page = 0
+    if ":" in callback.data:
+        try:
+            page = max(0, int(callback.data.split(":")[1]))
+        except ValueError:
+            page = 0
+    total = len(channels)
+    start = page * LIST_PAGE_SIZE
+    end = start + LIST_PAGE_SIZE
+    chunk = channels[start:end]
+    total_pages = max(1, (total + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+
+    text = (
+        "🔐 **FSub & Access Management**\n\n"
+        f"• Required Access: {format_bool_badge(is_enabled)}\n"
+        f"• Enforcement Mode: {'🛡 Aggressive' if enforcement['mode'] == 'aggressive' else '✅ Normal'}\n"
+        f"• Checks: `{enforcement['checks']}` | Fails: `{enforcement['failed_checks']}` | Revoked: `{enforcement['revoked_access']}`\n"
+        f"• Channels: `{total}`\n\n"
+        "**What this does:**\n"
+        "• Keeps non-admin users in required channels before bot usage.\n\n"
+    )
+    if chunk:
+        text += "**Configured channels:**\n"
+        for i, ch in enumerate(chunk, start + 1):
             text += f"{i}. {ch.get('name', 'Unknown')} (`{ch['id']}`)\n"
+        text += f"\n_Page {page + 1}/{total_pages}_"
     else:
-        text += "_No channels configured_\n"
-    
-    text += "\n**Commands:**\n"
-    text += "• `/addfsub <id> [link]` - Add channel\n"
-    text += "• `/remfsub <id>` - Remove channel\n"
-    text += "• `/fsub` - List channels"
-    
+        text += "_No channels configured yet._"
+
     buttons = [
         [
-            InlineKeyboardButton(
-                "🔒 FSub Locked ON",
-                callback_data="fsub_locked_info"
-            )
+            InlineKeyboardButton("➕ Add Channel Wizard", callback_data="wiz_fsub_start"),
+            InlineKeyboardButton("➖ Remove Channel", callback_data="wiz_fsub_remove_pick")
         ],
+        [
+            InlineKeyboardButton(
+                "🛡 Set Normal" if enforcement["mode"] == "aggressive" else "🛡 Set Aggressive",
+                callback_data="toggle_enforcement_mode"
+            ),
+            InlineKeyboardButton("🔄 Re-check Now", callback_data="fsub_recheck_now")
+        ],
+        [InlineKeyboardButton("📜 Revocation Logs", callback_data="admin_safety_logs:0")],
+        [InlineKeyboardButton("🧭 Guide", callback_data="admin_guide")],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]
     ]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"admin_fsub:{page-1}"))
+    if end < total:
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"admin_fsub:{page+1}"))
+    if nav:
+        buttons.insert(1, nav)
     
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -962,6 +1295,73 @@ async def admin_fsub_callback(client: Client, callback: CallbackQuery):
 async def toggle_fsub_callback(client: Client, callback: CallbackQuery):
     await db.toggle_fsub(True)
     await callback.answer("Channel subscription requirements cannot be disabled in this deployment.", show_alert=True)
+    await admin_fsub_callback(client, callback)
+
+@app.on_callback_query(filters.regex("^toggle_enforcement_mode$"))
+@admin_only
+async def toggle_enforcement_mode_callback(client: Client, callback: CallbackQuery):
+    current = await db.get_enforcement_mode()
+    new_mode = "normal" if current == "aggressive" else "aggressive"
+    await db.set_enforcement_mode(new_mode)
+    await log_admin_action(callback.from_user.id, "set_enforcement_mode", {"mode": new_mode})
+    await callback.answer(f"Enforcement mode set to {new_mode.upper()}.", show_alert=True)
+    await admin_fsub_callback(client, callback)
+
+@app.on_callback_query(filters.regex("^fsub_recheck_now$"))
+@admin_only
+async def fsub_recheck_now_callback(client: Client, callback: CallbackQuery):
+    await db.log_user_event(
+        callback.from_user.id,
+        "admin_action",
+        chat_id=callback.from_user.id,
+        metadata={"action": "manual_recheck_requested"}
+    )
+    await callback.answer("Manual re-check marker saved to safety logs.", show_alert=True)
+
+@app.on_callback_query(filters.regex("^wiz_fsub_start$"))
+@admin_only
+async def wizard_fsub_start_callback(client: Client, callback: CallbackQuery):
+    set_admin_wizard_state(callback.from_user.id, "fsub", "await_channel_id", {})
+    await callback.message.edit_text(
+        "🔐 **FSub Setup Wizard**\n\n"
+        "**Step 1/3:** Send channel ID now (example: `-1001234567890`).",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="wiz_cancel")],
+            [InlineKeyboardButton("🔙 Back", callback_data="admin_fsub:0")]
+        ])
+    )
+
+@app.on_callback_query(filters.regex("^wiz_fsub_remove_pick$"))
+@admin_only
+async def wizard_fsub_remove_pick_callback(client: Client, callback: CallbackQuery):
+    channels = await db.get_fsub_channels()
+    if not channels:
+        await callback.answer("No channels to remove.", show_alert=True)
+        return
+    buttons = []
+    for ch in channels[:20]:
+        buttons.append([
+            InlineKeyboardButton(
+                f"🗑 {ch.get('name', 'Channel')[:24]}",
+                callback_data=f"confirm_remfsub:{int(ch['id'])}"
+            )
+        ])
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_fsub:0")])
+    await callback.message.edit_text(
+        "➖ **Remove FSub Channel**\n\nSelect channel to remove:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+@app.on_callback_query(filters.regex(r"^confirm_remfsub:\-?\d+$"))
+@admin_only
+async def confirm_remove_fsub_callback(client: Client, callback: CallbackQuery):
+    channel_id = int(callback.data.split(":")[1])
+    success = await db.remove_fsub_channel(channel_id)
+    if success:
+        await log_admin_action(callback.from_user.id, "remove_fsub_channel", {"channel_id": channel_id})
+        await callback.answer("FSub channel removed.", show_alert=True)
+    else:
+        await callback.answer("Channel not found.", show_alert=True)
     await admin_fsub_callback(client, callback)
 
 # ----- ADS MANAGEMENT -----
@@ -994,6 +1394,7 @@ async def set_ad_command(client: Client, message: Message):
     button_url = parts[2] if len(parts) > 2 else ""
     
     await db.set_ads(True, ad_text, button_text, button_url)
+    await log_admin_action(message.from_user.id, "set_ad_command", {"with_button": bool(button_text and button_url)})
     
     await message.reply_text(
         f"✅ **Advertisement Set!**\n\n"
@@ -1005,8 +1406,15 @@ async def set_ad_command(client: Client, message: Message):
 @app.on_message(filters.command("delad") & filters.private)
 @admin_only
 async def delete_ad_command(client: Client, message: Message):
-    await db.set_ads(False, "", "", "")
-    await message.reply_text("✅ Advertisement deleted!")
+    await message.reply_text(
+        "⚠️ **Confirm Delete Ad**\n\nThis removes ad message and button.",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Confirm", callback_data="confirm_delad"),
+                InlineKeyboardButton("❌ Cancel", callback_data="admin_ads_wizard")
+            ]
+        ])
+    )
 
 @app.on_message(filters.command("togglead") & filters.private)
 @admin_only
@@ -1014,24 +1422,23 @@ async def toggle_ad_command(client: Client, message: Message):
     ads = await db.get_ads()
     new_status = not ads["enabled"]
     await db.toggle_ads(new_status)
+    await log_admin_action(message.from_user.id, "toggle_ads", {"enabled": new_status})
     status = "🟢 Enabled" if new_status else "🔴 Disabled"
     await message.reply_text(f"✅ Ads {status}")
 
-@app.on_callback_query(filters.regex("^admin_ads$"))
+@app.on_callback_query(filters.regex("^(admin_ads|admin_ads_wizard)$"))
 @admin_only
 async def admin_ads_callback(client: Client, callback: CallbackQuery):
     ads = await db.get_ads()
+    clear_admin_wizard_state(callback.from_user.id)
     
     text = (
-        f"📣 **Advertisement Management**\n\n"
-        f"**Status:** {'🟢 Enabled' if ads['enabled'] else '🔴 Disabled'}\n"
-        f"**Message:** {ads['message'][:50] + '...' if len(ads['message']) > 50 else ads['message'] or 'Not set'}\n"
-        f"**Button:** {ads['button_text'] or 'Not set'}\n\n"
-        f"**Commands:**\n"
-        f"• `/setad <message>` - Set ad\n"
-        f"• `/setad <msg> | <btn> | <url>` - With button\n"
-        f"• `/delad` - Delete ad\n"
-        f"• `/togglead` - Toggle ads"
+        "📣 **Ads Wizard**\n\n"
+        f"• Status: {format_bool_badge(ads['enabled'])}\n"
+        f"• Message: {ads['message'][:60] + '...' if len(ads['message']) > 60 else ads['message'] or 'Not set'}\n"
+        f"• Button: {ads['button_text'] or 'Not set'}\n\n"
+        "**What this does:**\n"
+        "• Configure promo card shown in start panel.\n"
     )
     
     buttons = [
@@ -1039,8 +1446,11 @@ async def admin_ads_callback(client: Client, callback: CallbackQuery):
             InlineKeyboardButton(
                 "🔴 Disable" if ads['enabled'] else "🟢 Enable",
                 callback_data="toggle_ads_btn"
-            )
+            ),
+            InlineKeyboardButton("✍️ Create/Update Ad", callback_data="wiz_ads_start")
         ],
+        [InlineKeyboardButton("🗑 Delete Ad", callback_data="confirm_delad")],
+        [InlineKeyboardButton("🧭 Guide", callback_data="admin_guide")],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]
     ]
     
@@ -1052,22 +1462,46 @@ async def toggle_ads_btn_callback(client: Client, callback: CallbackQuery):
     ads = await db.get_ads()
     new_status = not ads["enabled"]
     await db.toggle_ads(new_status)
+    await log_admin_action(callback.from_user.id, "toggle_ads", {"enabled": new_status})
     await callback.answer(f"Ads {'Enabled' if new_status else 'Disabled'}!", show_alert=True)
     await admin_ads_callback(client, callback)
+
+@app.on_callback_query(filters.regex("^confirm_delad$"))
+@admin_only
+async def confirm_delete_ad_callback(client: Client, callback: CallbackQuery):
+    await db.set_ads(False, "", "", "")
+    await log_admin_action(callback.from_user.id, "delete_ad")
+    await callback.answer("Advertisement deleted.", show_alert=True)
+    await admin_ads_callback(client, callback)
+
+@app.on_callback_query(filters.regex("^wiz_ads_start$"))
+@admin_only
+async def wizard_ads_start_callback(client: Client, callback: CallbackQuery):
+    set_admin_wizard_state(callback.from_user.id, "ads", "await_message", {})
+    await callback.message.edit_text(
+        "📣 **Ad Wizard**\n\n"
+        "**Step 1/3:** Send ad message text now.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="wiz_cancel")],
+            [InlineKeyboardButton("🔙 Back", callback_data="admin_ads_wizard")]
+        ])
+    )
 
 # ----- SETTINGS -----
 @app.on_callback_query(filters.regex("^admin_settings$"))
 @admin_only
 async def admin_settings_callback(client: Client, callback: CallbackQuery):
     is_maintenance = await db.is_maintenance()
+    enforcement = await db.get_enforcement_mode()
+    welcome = await db.get_welcome_message()
     
     text = (
-        "🔧 **Bot Settings**\n\n"
-        f"**Maintenance Mode:** {'🟢 ON' if is_maintenance else '🔴 OFF'}\n\n"
-        "**Commands:**\n"
-        "• `/maintenance on/off` - Toggle maintenance\n"
-        "• `/setwelcome <message>` - Set welcome message\n"
-        "• `/resetwelcome` - Reset to default"
+        "🔧 **Settings Wizard**\n\n"
+        f"• Maintenance: {format_bool_badge(is_maintenance)}\n"
+        f"• Enforcement Mode: {'🛡 Aggressive' if enforcement == 'aggressive' else '✅ Normal'}\n"
+        f"• Custom Welcome: {format_bool_badge(bool(welcome))}\n\n"
+        "**What this does:**\n"
+        "• Controls global behavior and admin safety defaults."
     )
     
     buttons = [
@@ -1075,8 +1509,12 @@ async def admin_settings_callback(client: Client, callback: CallbackQuery):
             InlineKeyboardButton(
                 "🔴 Disable Maintenance" if is_maintenance else "🟢 Enable Maintenance",
                 callback_data="toggle_maintenance"
-            )
+            ),
+            InlineKeyboardButton("📝 Set Welcome", callback_data="wiz_setwelcome")
         ],
+        [InlineKeyboardButton("♻️ Reset Welcome", callback_data="reset_welcome_btn")],
+        [InlineKeyboardButton("🧪 Setup Checks", callback_data="admin_setup_checks")],
+        [InlineKeyboardButton("🧭 Guide", callback_data="admin_guide")],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]
     ]
     
@@ -1087,9 +1525,42 @@ async def admin_settings_callback(client: Client, callback: CallbackQuery):
 async def toggle_maintenance_callback(client: Client, callback: CallbackQuery):
     current = await db.is_maintenance()
     await db.set_maintenance(not current)
+    await log_admin_action(callback.from_user.id, "toggle_maintenance", {"enabled": (not current)})
     status = "🟢 Enabled" if not current else "🔴 Disabled"
     await callback.answer(f"Maintenance {status}!", show_alert=True)
     await admin_settings_callback(client, callback)
+
+@app.on_callback_query(filters.regex("^reset_welcome_btn$"))
+@admin_only
+async def reset_welcome_btn_callback(client: Client, callback: CallbackQuery):
+    await db.set_welcome_message("")
+    await log_admin_action(callback.from_user.id, "reset_welcome")
+    await callback.answer("Welcome reset to default.", show_alert=True)
+    await admin_settings_callback(client, callback)
+
+@app.on_callback_query(filters.regex("^admin_setup_checks$"))
+@admin_only
+async def admin_setup_checks_callback(client: Client, callback: CallbackQuery):
+    checks = [
+        ("WEB_BASE_URL", bool(WEB_BASE_URL), "Needed for web dashboard links."),
+        ("ADMIN_DASHBOARD_TOKEN", bool(ADMIN_DASHBOARD_TOKEN), "Needed for secure dashboard access."),
+        ("SUPPORT_CHAT", bool(SUPPORT_CHAT), "Recommended for user help routing."),
+        ("REQUIRED_FSUB_CHANNELS", len(REQUIRED_FSUB_CHANNELS) > 0, "Required channels should be set clearly.")
+    ]
+    lines = []
+    for name, ok, note in checks:
+        lines.append(f"• `{name}`: {'✅ OK' if ok else '⚠️ Missing'} — {note}")
+    text = (
+        "🧪 **Admin Setup Checks**\n\n"
+        "Use this to catch misconfiguration quickly.\n\n"
+        + "\n".join(lines)
+    )
+    buttons = [
+        [InlineKeyboardButton("🔐 Open FSub & Access", callback_data="admin_fsub:0")],
+        [InlineKeyboardButton("📈 Open Analytics", callback_data="admin_analytics")],
+        [InlineKeyboardButton("🔧 Back to Settings", callback_data="admin_settings")]
+    ]
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 @app.on_message(filters.command("maintenance") & filters.private)
 @admin_only
@@ -1108,9 +1579,11 @@ async def maintenance_command(client: Client, message: Message):
     
     if action == "on":
         await db.set_maintenance(True)
+        await log_admin_action(message.from_user.id, "maintenance_command", {"enabled": True})
         await message.reply_text("✅ Maintenance mode **enabled**!")
     elif action == "off":
         await db.set_maintenance(False)
+        await log_admin_action(message.from_user.id, "maintenance_command", {"enabled": False})
         await message.reply_text("✅ Maintenance mode **disabled**!")
     else:
         await message.reply_text("❌ Use: `/maintenance on` or `/maintenance off`")
@@ -1131,19 +1604,261 @@ async def set_welcome_command(client: Client, message: Message):
     
     welcome_msg = message.text.split(None, 1)[1]
     await db.set_welcome_message(welcome_msg)
+    await log_admin_action(message.from_user.id, "set_welcome")
     await message.reply_text(f"✅ Welcome message set!\n\n**Preview:**\n{welcome_msg}")
 
 @app.on_message(filters.command("resetwelcome") & filters.private)
 @admin_only
 async def reset_welcome_command(client: Client, message: Message):
     await db.set_welcome_message("")
+    await log_admin_action(message.from_user.id, "reset_welcome")
     await message.reply_text("✅ Welcome message reset to default!")
+
+@app.on_callback_query(filters.regex("^wiz_setwelcome$"))
+@admin_only
+async def wizard_setwelcome_callback(client: Client, callback: CallbackQuery):
+    set_admin_wizard_state(callback.from_user.id, "settings", "await_welcome_message", {})
+    await callback.message.edit_text(
+        "📝 **Welcome Wizard**\n\n"
+        "Send the new welcome message now.\n"
+        "Use `skip` to cancel.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="wiz_cancel")],
+            [InlineKeyboardButton("🔙 Back", callback_data="admin_settings")]
+        ])
+    )
+
+@app.on_callback_query(filters.regex("^wiz_cancel$"))
+@admin_only
+async def wizard_cancel_callback(client: Client, callback: CallbackQuery):
+    clear_admin_wizard_state(callback.from_user.id)
+    await callback.answer("Wizard cancelled.", show_alert=True)
+    await admin_panel_callback(client, callback)
+
+@app.on_callback_query(filters.regex("^wiz_ads_publish$"))
+@admin_only
+async def wizard_ads_publish_callback(client: Client, callback: CallbackQuery):
+    state = get_admin_wizard_state(callback.from_user.id)
+    data = state.get("data", {})
+    if state.get("flow") != "ads" or state.get("step") != "preview":
+        await callback.answer("No ad draft found.", show_alert=True)
+        return
+    await db.set_ads(True, data.get("message", ""), data.get("button_text", ""), data.get("button_url", ""))
+    await log_admin_action(callback.from_user.id, "publish_ad", {"with_button": bool(data.get("button_text"))})
+    clear_admin_wizard_state(callback.from_user.id)
+    await callback.answer("Ad published.", show_alert=True)
+    await admin_ads_callback(client, callback)
+
+@app.on_callback_query(filters.regex("^wiz_fsub_save$"))
+@admin_only
+async def wizard_fsub_save_callback(client: Client, callback: CallbackQuery):
+    state = get_admin_wizard_state(callback.from_user.id)
+    data = state.get("data", {})
+    if state.get("flow") != "fsub" or state.get("step") != "preview":
+        await callback.answer("No FSub draft found.", show_alert=True)
+        return
+    channel_id = int(data["channel_id"])
+    success = await db.add_fsub_channel(channel_id, data.get("channel_name", f"Channel {channel_id}"), data.get("channel_link", ""))
+    clear_admin_wizard_state(callback.from_user.id)
+    if success:
+        await log_admin_action(callback.from_user.id, "add_fsub_channel", {"channel_id": channel_id})
+        await callback.answer("FSub channel added.", show_alert=True)
+    else:
+        await callback.answer("Channel already exists.", show_alert=True)
+    await admin_fsub_callback(client, callback)
+
+@app.on_callback_query(filters.regex(r"^admin_safety_logs(?::\d+)?$"))
+@admin_only
+async def admin_safety_logs_callback(client: Client, callback: CallbackQuery):
+    page = 0
+    if ":" in callback.data:
+        try:
+            page = max(0, int(callback.data.split(":")[1]))
+        except ValueError:
+            page = 0
+    events = await db.get_recent_user_events(limit=200, event_types=["admin_action", "enforcement_revoked", "broadcast_report"])
+    total = len(events)
+    start = page * LIST_PAGE_SIZE
+    end = start + LIST_PAGE_SIZE
+    chunk = events[start:end]
+    total_pages = max(1, (total + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    lines = []
+    for event in chunk:
+        ts = str(event.get("timestamp", ""))[:16].replace("T", " ")
+        et = event.get("event_type", "event")
+        uid = event.get("user_id", 0)
+        meta = event.get("metadata", {})
+        summary = meta.get("action") or meta.get("reason") or meta.get("mode") or "details"
+        lines.append(f"• `{ts}` | **{et}** | u:`{uid}` | {str(summary)[:40]}")
+    text = (
+        "🛡 **Safety Logs**\n\n"
+        + ("\n".join(lines) if lines else "_No safety events yet._")
+        + f"\n\n_Page {page + 1}/{total_pages} • Total {total}_"
+    )
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"admin_safety_logs:{page-1}"))
+    if end < total:
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"admin_safety_logs:{page+1}"))
+    buttons = []
+    if nav:
+        buttons.append(nav)
+    buttons.extend([
+        [InlineKeyboardButton("🔄 Refresh", callback_data=f"admin_safety_logs:{page}")],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]
+    ])
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+@app.on_message(filters.private & ~filters.command(ADMIN_TEXT_COMMANDS))
+async def admin_wizard_input_handler(client: Client, message: Message):
+    if not message.from_user or not await is_admin(message.from_user.id):
+        return
+    state = get_admin_wizard_state(message.from_user.id)
+    if not state:
+        return
+    flow = state.get("flow")
+    step = state.get("step")
+    data = state.get("data", {})
+
+    if flow == "broadcast" and step == "await_content":
+        set_admin_wizard_state(
+            message.from_user.id,
+            "broadcast",
+            "preview",
+            {
+                **data,
+                "source_chat": message.chat.id,
+                "source_message": message.id
+            }
+        )
+        await message.reply_text(
+            "📡 **Broadcast Draft Ready**\n\n"
+            "**Step 3/3:** Preview or send now.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("👀 Dry-run Preview", callback_data="wiz_broadcast_preview")],
+                [InlineKeyboardButton("✅ Confirm & Send", callback_data="wiz_broadcast_confirm")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="wiz_cancel")]
+            ])
+        )
+        return
+
+    if flow == "ads":
+        text = (message.text or message.caption or "").strip()
+        if step == "await_message":
+            if not text:
+                await message.reply_text("❌ Send ad text first.")
+                return
+            set_admin_wizard_state(message.from_user.id, "ads", "await_button_text", {"message": text})
+            await message.reply_text("Step 2/3: Send button text, or type `skip` for no button.")
+            return
+        if step == "await_button_text":
+            if text.lower() == "skip":
+                set_admin_wizard_state(message.from_user.id, "ads", "preview", {"message": data.get("message", ""), "button_text": "", "button_url": ""})
+                await message.reply_text(
+                    f"📣 **Ad Preview**\n\n📝 {data.get('message', '')}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✅ Publish", callback_data="wiz_ads_publish")],
+                        [InlineKeyboardButton("❌ Cancel", callback_data="wiz_cancel")]
+                    ])
+                )
+                return
+            set_admin_wizard_state(message.from_user.id, "ads", "await_button_url", {**data, "button_text": text})
+            await message.reply_text("Step 3/3: Send button URL (https://...), or type `skip`.")
+            return
+        if step == "await_button_url":
+            button_url = "" if text.lower() == "skip" else text
+            if button_url and not is_valid_http_url(button_url):
+                await message.reply_text("❌ URL must start with http:// or https://. Send `skip` to continue without a button URL.")
+                return
+            preview_data = {**data, "button_url": button_url}
+            set_admin_wizard_state(message.from_user.id, "ads", "preview", preview_data)
+            preview_text = (
+                "📣 **Ad Preview**\n\n"
+                f"📝 {preview_data.get('message', '')}\n"
+                f"🔘 {preview_data.get('button_text', 'No button')}\n"
+                f"🔗 {preview_data.get('button_url', 'No URL')}"
+            )
+            await message.reply_text(
+                preview_text,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Publish", callback_data="wiz_ads_publish")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="wiz_cancel")]
+                ])
+            )
+            return
+
+    if flow == "settings" and step == "await_welcome_message":
+        text = (message.text or message.caption or "").strip()
+        if text.lower() == "skip":
+            clear_admin_wizard_state(message.from_user.id)
+            await message.reply_text("Cancelled.")
+            return
+        if not text:
+            await message.reply_text("❌ Welcome message cannot be empty.")
+            return
+        await db.set_welcome_message(text)
+        await log_admin_action(message.from_user.id, "set_welcome")
+        clear_admin_wizard_state(message.from_user.id)
+        await message.reply_text(
+            "✅ Welcome message updated.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔧 Open Settings", callback_data="admin_settings")]])
+        )
+        return
+
+    if flow == "fsub":
+        text = (message.text or message.caption or "").strip()
+        if step == "await_channel_id":
+            try:
+                channel_id = int(text)
+            except ValueError:
+                await message.reply_text("❌ Invalid channel ID. Send a numeric ID like `-100...`.")
+                return
+            channel_name = f"Channel {channel_id}"
+            try:
+                chat = await client.get_chat(channel_id)
+                channel_name = chat.title or channel_name
+            except Exception:
+                pass
+            set_admin_wizard_state(message.from_user.id, "fsub", "await_channel_link", {"channel_id": channel_id, "channel_name": channel_name})
+            await message.reply_text("Step 2/3: Send invite link or type `skip`.")
+            return
+        if step == "await_channel_link":
+            channel_link = "" if text.lower() == "skip" else text
+            channel_id = int(data["channel_id"])
+            verified = True
+            verify_error = ""
+            try:
+                me = await client.get_me()
+                member = await client.get_chat_member(channel_id, me.id)
+                member_status = getattr(member, "status", "")
+                if member_status not in ("administrator", "creator"):
+                    verified = False
+                    verify_error = "Bot must be administrator or creator in this channel."
+            except Exception as e:
+                verified = False
+                verify_error = str(e)
+            preview_data = {**data, "channel_link": channel_link, "verified": verified, "verify_error": verify_error}
+            set_admin_wizard_state(message.from_user.id, "fsub", "preview", preview_data)
+            await message.reply_text(
+                "🔐 **FSub Preview**\n\n"
+                f"📢 {preview_data.get('channel_name')}\n"
+                f"🆔 `{preview_data.get('channel_id')}`\n"
+                f"🔗 {preview_data.get('channel_link') or 'Auto'}\n"
+                f"✅ Verify: {'Passed' if verified else 'Failed'}\n"
+                f"{'⚠️ ' + verify_error if verify_error else ''}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Save Anyway", callback_data="wiz_fsub_save")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="wiz_cancel")]
+                ])
+            )
+            return
 
 # ----- STATS -----
 @app.on_callback_query(filters.regex("^admin_stats_detail$"))
 @admin_only
 async def admin_stats_detail_callback(client: Client, callback: CallbackQuery):
     stats = await db.get_bot_stats()
+    enforcement = stats.get("enforcement", {})
     
     text = (
         "📊 **Detailed Statistics**\n\n"
@@ -1151,13 +1866,19 @@ async def admin_stats_detail_callback(client: Client, callback: CallbackQuery):
         f"🚫 **Banned Users:** {stats['banned_users']}\n"
         f"📢 **FSub Channels:** {stats['fsub_channels']}\n"
         f"🔐 **Required Channels:** {', '.join(str(x) for x in REQUIRED_FSUB_CHANNELS)}\n"
+        f"🛡 **Enforcement Mode:** {stats.get('enforcement_mode', 'normal').upper()}\n"
+        f"🔎 **Checks / Fails / Revoked:** {enforcement.get('checks', 0)} / {enforcement.get('failed_checks', 0)} / {enforcement.get('revoked_access', 0)}\n"
         f"📤 **Total Uploads:** {stats['total_uploads']}\n"
         f"💾 **Total Data:** {human_readable_size(stats['total_size'])}\n"
         f"📅 **Bot Started:** {stats['start_time'][:10]}\n\n"
         "📈 Use **Analytics** panel for daily/weekly/monthly/yearly trends."
     )
     
-    buttons = [[InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]]
+    buttons = [
+        [InlineKeyboardButton("📈 Analytics", callback_data="admin_analytics")],
+        [InlineKeyboardButton("🧭 Guide", callback_data="admin_guide")],
+        [InlineKeyboardButton("🔙 Back", callback_data="admin_panel")]
+    ]
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 def format_analytics_block(title: str, data: dict) -> str:
@@ -1225,6 +1946,8 @@ async def admin_analytics_callback(client: Client, callback: CallbackQuery):
     buttons = []
     if dashboard_url:
         buttons.append([InlineKeyboardButton("🌐 Open Web Dashboard", url=dashboard_url)])
+    buttons.append([InlineKeyboardButton("🛡 Safety Logs", callback_data="admin_safety_logs:0")])
+    buttons.append([InlineKeyboardButton("🧭 Guide", callback_data="admin_guide")])
     buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_panel")])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -1259,8 +1982,10 @@ async def immediate_backup(client, message, is_url=False, url_text=None):
 
 # ================== URL HANDLING ==================
 
-@app.on_message(filters.text & filters.private & ~filters.command(["start", "help", "stats", "ping", "about", "analytics", "usernamefile", "broadcast", "users", "ban", "unban", "banned", "user", "addfsub", "remfsub", "fsub", "setad", "delad", "togglead", "maintenance", "setwelcome", "resetwelcome", "export"]))
+@app.on_message(filters.text & filters.private & ~filters.command(ADMIN_TEXT_COMMANDS))
 async def url_handler(client: Client, message: Message):
+    if message.from_user and await is_admin(message.from_user.id) and get_admin_wizard_state(message.from_user.id):
+        return
     text = message.text.strip()
     
     if not (text.startswith("http://") or text.startswith("https://")):
@@ -1300,6 +2025,8 @@ async def url_handler(client: Client, message: Message):
 @app.on_message((filters.document | filters.video | filters.audio | filters.photo) & filters.private)
 async def file_handler(client: Client, message: Message):
     if message.chat.id == BACKUP_CHANNEL_ID:
+        return
+    if message.from_user and await is_admin(message.from_user.id) and get_admin_wizard_state(message.from_user.id):
         return
 
     # Force subscribe check
