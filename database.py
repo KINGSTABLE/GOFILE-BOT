@@ -409,18 +409,18 @@ class Database:
 
     async def get_enforcement_mode(self):
         """Get current enforcement mode."""
-        mode = self.data["settings"].get("enforcement_mode", "normal")
-        if mode not in ("normal", "aggressive"):
-            mode = "normal"
-        return mode
+        return self._normalize_enforcement_mode(
+            self.data["settings"].get("enforcement_mode", "normal")
+        )
 
     async def set_enforcement_mode(self, mode: str):
         """Set enforcement mode: normal/aggressive."""
-        mode = (mode or "normal").lower().strip()
-        if mode not in ("normal", "aggressive"):
-            mode = "normal"
-        self.data["settings"]["enforcement_mode"] = mode
+        self.data["settings"]["enforcement_mode"] = self._normalize_enforcement_mode(mode)
         await self._save_db()
+
+    def _normalize_enforcement_mode(self, mode: str) -> str:
+        mode = (mode or "normal").lower().strip()
+        return mode if mode in ("normal", "aggressive") else "normal"
 
     async def record_enforcement_check(self, passed: bool, revoked: bool = False, user_id: int = 0, persist: bool = True):
         """Track force-subscription enforcement metrics."""

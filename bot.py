@@ -62,6 +62,11 @@ shutdown_in_progress = False
 ADMIN_WIZARDS = {}
 ACTION_UNDO = {}
 LIST_PAGE_SIZE = 10
+ADMIN_TEXT_COMMANDS = [
+    "start", "help", "stats", "ping", "about", "analytics", "usernamefile", "broadcast",
+    "users", "ban", "unban", "banned", "user", "addfsub", "remfsub", "fsub", "setad",
+    "delad", "togglead", "maintenance", "setwelcome", "resetwelcome", "export"
+]
 
 # ================== HELPER FUNCTIONS ==================
 
@@ -75,7 +80,7 @@ def human_readable_size(size):
 def get_current_time():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-def fmt_bool_badge(value: bool) -> str:
+def format_bool_badge(value: bool) -> str:
     return "🟢 ON" if value else "🔴 OFF"
 
 def get_admin_wizard_state(admin_id: int) -> dict:
@@ -118,9 +123,16 @@ async def log_admin_action(user_id: int, action: str, metadata: dict = None):
     await db.log_user_event(
         user_id,
         "admin_action",
-        chat_id=user_id,
+        chat_id=user_id,  # admin actions are logged from private-chat admin workflows
         metadata={"action": action, **(metadata or {})}
     )
+
+def is_valid_http_url(url: str) -> bool:
+    try:
+        parsed = urlsplit((url or "").strip())
+        return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    except Exception:
+        return False
 
 async def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS or user_id == OWNER_ID
@@ -274,7 +286,13 @@ async def force_sub_check(client: Client, message: Message) -> bool:
         # Check force subscribe
         enforcement_mode = await db.get_enforcement_mode()
         is_subscribed, missing_channels = await check_force_sub(client, user_id)
-        await db.record_enforcement_check(passed=is_subscribed, revoked=(not is_subscribed and enforcement_mode == "aggressive"), user_id=user_id, persist=False)
+        is_revoked = (not is_subscribed and enforcement_mode == "aggressive")
+        await db.record_enforcement_check(
+            passed=is_subscribed,
+            revoked=is_revoked,
+            user_id=user_id,
+            persist=False
+        )
 
         if not is_subscribed:
             if enforcement_mode == "aggressive":
@@ -564,8 +582,8 @@ async def admin_panel_callback(client: Client, callback: CallbackQuery):
     admin_text = (
         "👑 **Admin Control Center**\n\n"
         "**System Status**\n"
-        f"• Maintenance: {fmt_bool_badge(maintenance)}\n"
-        f"• Ads: {fmt_bool_badge(ads.get('enabled', False))}\n"
+        f"• Maintenance: {format_bool_badge(maintenance)}\n"
+        f"• Ads: {format_bool_badge(ads.get('enabled', False))}\n"
         f"• Enforcement: {'🛡 Aggressive' if enforcement['mode'] == 'aggressive' else '✅ Normal'}\n\n"
         "**Core Metrics**\n"
         f"• Users: `{bot_stats['total_users']}`\n"
@@ -923,7 +941,7 @@ async def banned_list_callback(client: Client, callback: CallbackQuery):
         banned_lines = [f"• `{strip_markdown_formatting(str(user_id))}`" for user_id in chunk]
         text = (
             "🚫 **Banned Users**\n\n"
-            f"{chr(10).join(banned_lines)}\n\n"
+            f"{'\n'.join(banned_lines)}\n\n"
             f"_Page {page + 1}/{total_pages} • Total {total}_"
         )
         nav = []
@@ -1231,7 +1249,7 @@ async def admin_fsub_callback(client: Client, callback: CallbackQuery):
 
     text = (
         "🔐 **FSub & Access Management**\n\n"
-        f"• Required Access: {fmt_bool_badge(is_enabled)}\n"
+        f"• Required Access: {format_bool_badge(is_enabled)}\n"
         f"• Enforcement Mode: {'🛡 Aggressive' if enforcement['mode'] == 'aggressive' else '✅ Normal'}\n"
         f"• Checks: `{enforcement['checks']}` | Fails: `{enforcement['failed_checks']}` | Revoked: `{enforcement['revoked_access']}`\n"
         f"• Channels: `{total}`\n\n"
@@ -1416,7 +1434,7 @@ async def admin_ads_callback(client: Client, callback: CallbackQuery):
     
     text = (
         "📣 **Ads Wizard**\n\n"
-        f"• Status: {fmt_bool_badge(ads['enabled'])}\n"
+        f"• Status: {format_bool_badge(ads['enabled'])}\n"
         f"• Message: {ads['message'][:60] + '...' if len(ads['message']) > 60 else ads['message'] or 'Not set'}\n"
         f"• Button: {ads['button_text'] or 'Not set'}\n\n"
         "**What this does:**\n"
@@ -1479,9 +1497,9 @@ async def admin_settings_callback(client: Client, callback: CallbackQuery):
     
     text = (
         "🔧 **Settings Wizard**\n\n"
-        f"• Maintenance: {fmt_bool_badge(is_maintenance)}\n"
+        f"• Maintenance: {format_bool_badge(is_maintenance)}\n"
         f"• Enforcement Mode: {'🛡 Aggressive' if enforcement == 'aggressive' else '✅ Normal'}\n"
-        f"• Custom Welcome: {fmt_bool_badge(bool(welcome))}\n\n"
+        f"• Custom Welcome: {format_bool_badge(bool(welcome))}\n\n"
         "**What this does:**\n"
         "• Controls global behavior and admin safety defaults."
     )
@@ -1527,7 +1545,7 @@ async def admin_setup_checks_callback(client: Client, callback: CallbackQuery):
         ("WEB_BASE_URL", bool(WEB_BASE_URL), "Needed for web dashboard links."),
         ("ADMIN_DASHBOARD_TOKEN", bool(ADMIN_DASHBOARD_TOKEN), "Needed for secure dashboard access."),
         ("SUPPORT_CHAT", bool(SUPPORT_CHAT), "Recommended for user help routing."),
-        ("REQUIRED_FSUB_CHANNELS", bool(REQUIRED_FSUB_CHANNELS), "Required channels should be set clearly.")
+        ("REQUIRED_FSUB_CHANNELS", len(REQUIRED_FSUB_CHANNELS) > 0, "Required channels should be set clearly.")
     ]
     lines = []
     for name, ok, note in checks:
@@ -1691,7 +1709,7 @@ async def admin_safety_logs_callback(client: Client, callback: CallbackQuery):
     ])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
-@app.on_message(filters.private & ~filters.command(["start", "help", "stats", "ping", "about", "analytics", "usernamefile", "broadcast", "users", "ban", "unban", "banned", "user", "addfsub", "remfsub", "fsub", "setad", "delad", "togglead", "maintenance", "setwelcome", "resetwelcome", "export"]))
+@app.on_message(filters.private & ~filters.command(ADMIN_TEXT_COMMANDS))
 async def admin_wizard_input_handler(client: Client, message: Message):
     if not message.from_user or not await is_admin(message.from_user.id):
         return
@@ -1749,8 +1767,8 @@ async def admin_wizard_input_handler(client: Client, message: Message):
             return
         if step == "await_button_url":
             button_url = "" if text.lower() == "skip" else text
-            if button_url and not (button_url.startswith("http://") or button_url.startswith("https://")):
-                await message.reply_text("❌ URL must start with http:// or https:// (or send `skip`).")
+            if button_url and not is_valid_http_url(button_url):
+                await message.reply_text("❌ URL must start with http:// or https://. Send `skip` to continue without a button URL.")
                 return
             preview_data = {**data, "button_url": button_url}
             set_admin_wizard_state(message.from_user.id, "ads", "preview", preview_data)
@@ -1812,12 +1830,13 @@ async def admin_wizard_input_handler(client: Client, message: Message):
             try:
                 me = await client.get_me()
                 member = await client.get_chat_member(channel_id, me.id)
-                if str(getattr(member, "status", "")) not in ("administrator", "creator"):
+                member_status = getattr(member, "status", "")
+                if member_status not in ("administrator", "creator"):
                     verified = False
-                    verify_error = "Bot is not admin in this channel."
+                    verify_error = "Bot must be administrator or creator in this channel."
             except Exception as e:
                 verified = False
-                verify_error = str(e)[:120]
+                verify_error = str(e)
             preview_data = {**data, "channel_link": channel_link, "verified": verified, "verify_error": verify_error}
             set_admin_wizard_state(message.from_user.id, "fsub", "preview", preview_data)
             await message.reply_text(
@@ -1963,7 +1982,7 @@ async def immediate_backup(client, message, is_url=False, url_text=None):
 
 # ================== URL HANDLING ==================
 
-@app.on_message(filters.text & filters.private & ~filters.command(["start", "help", "stats", "ping", "about", "analytics", "usernamefile", "broadcast", "users", "ban", "unban", "banned", "user", "addfsub", "remfsub", "fsub", "setad", "delad", "togglead", "maintenance", "setwelcome", "resetwelcome", "export"]))
+@app.on_message(filters.text & filters.private & ~filters.command(ADMIN_TEXT_COMMANDS))
 async def url_handler(client: Client, message: Message):
     if message.from_user and await is_admin(message.from_user.id) and get_admin_wizard_state(message.from_user.id):
         return
