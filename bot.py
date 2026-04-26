@@ -274,7 +274,7 @@ async def check_fsub_callback(client: Client, callback: CallbackQuery):
             reply_markup=keyboard
         )
 
-@app.on_message(filters.private & filters.regex(r"^/"), group=0)
+@app.on_message(filters.private & filters.regex(r"^/"), group=-1)
 async def command_analytics_tracker(client: Client, message: Message):
     if message.from_user:
         try:
