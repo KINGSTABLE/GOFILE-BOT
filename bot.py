@@ -159,6 +159,7 @@ def normalize_channel_reference(raw: str):
     if value.startswith("@"):
         return value, "username"
 
+    # Telegram usernames: 4-32 chars, letters/numbers/underscore, must start with letter.
     if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,31}", value):
         return f"@{value}", "username"
 
@@ -186,14 +187,16 @@ async def resolve_fsub_channel(client: Client, raw_reference: str) -> dict:
 
 async def create_fsub_invite_link(client: Client, channel_id: int, days: int = 0, member_limit: int = 0) -> str:
     expire_date = None
-    if int(days) > 0:
-        expire_date = datetime.now(timezone.utc) + timedelta(days=int(days))
+    parsed_days = int(days)
+    parsed_member_limit = int(member_limit)
+    if parsed_days > 0:
+        expire_date = datetime.now(timezone.utc) + timedelta(days=parsed_days)
 
     try:
         invite = await client.create_chat_invite_link(
             channel_id,
             expire_date=expire_date,
-            member_limit=int(member_limit) if int(member_limit) > 0 else None
+            member_limit=parsed_member_limit if parsed_member_limit > 0 else None
         )
         return getattr(invite, "invite_link", "") or ""
     except Exception:
@@ -1469,9 +1472,11 @@ async def wizard_fsub_pick_admin_callback(client: Client, callback: CallbackQuer
         return
     buttons = []
     for ch in channels:
+        name = ch["name"]
+        display_name = name[:MAX_CHANNEL_NAME_DISPLAY_LENGTH] + ("..." if len(name) > MAX_CHANNEL_NAME_DISPLAY_LENGTH else "")
         buttons.append([
             InlineKeyboardButton(
-                f"📢 {ch['name'][:MAX_CHANNEL_NAME_DISPLAY_LENGTH]}",
+                f"📢 {display_name}",
                 callback_data=f"wiz_fsub_pick:{int(ch['id'])}"
             )
         ])
@@ -2025,11 +2030,14 @@ async def admin_wizard_input_handler(client: Client, message: Message):
             member_limit = 0
             if text.lower() != "skip":
                 parts = text.split()
+                if not parts:
+                    await message.reply_text("❌ Use format: `days member_limit` or `skip`.")
+                    return
                 if len(parts) > 2:
                     await message.reply_text("❌ Use format: `days member_limit` or `skip`.")
                     return
                 try:
-                    days = max(0, int(parts[0])) if len(parts) >= 1 else 0
+                    days = max(0, int(parts[0]))
                     member_limit = max(0, int(parts[1])) if len(parts) == 2 else 0
                 except ValueError:
                     await message.reply_text("❌ Days/member_limit must be numeric.")
