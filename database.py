@@ -38,10 +38,18 @@ class Database:
             "settings": {
                 "fsub_enabled": True,
                 "maintenance_mode": False,
-                "welcome_message": ""
+                "welcome_message": "",
+                "enforcement_mode": "normal"
             },
             "analytics": {
                 "daily": {}
+            },
+            "enforcement": {
+                "checks": 0,
+                "failed_checks": 0,
+                "revoked_access": 0,
+                "last_revoked_at": "",
+                "last_revoked_user": 0
             },
             "user_events": []
         }
@@ -62,6 +70,16 @@ class Database:
                         loaded["bot_stats"]["last_username_export_at"] = ""
                     if "user_events" not in loaded:
                         loaded["user_events"] = []
+                    settings = loaded.get("settings", {})
+                    if "enforcement_mode" not in settings:
+                        settings["enforcement_mode"] = "normal"
+                    loaded["settings"] = settings
+                    if "enforcement" not in loaded:
+                        loaded["enforcement"] = default_data["enforcement"]
+                    else:
+                        for key, value in default_data["enforcement"].items():
+                            if key not in loaded["enforcement"]:
+                                loaded["enforcement"][key] = value
                     return loaded
             except:
                 return default_data
@@ -388,6 +406,52 @@ class Database:
     async def get_welcome_message(self):
         """Get custom welcome message"""
         return self.data["settings"].get("welcome_message", "")
+
+    async def get_enforcement_mode(self):
+        """Get current enforcement mode."""
+        mode = self.data["settings"].get("enforcement_mode", "normal")
+        if mode not in ("normal", "aggressive"):
+            mode = "normal"
+        return mode
+
+    async def set_enforcement_mode(self, mode: str):
+        """Set enforcement mode: normal/aggressive."""
+        mode = (mode or "normal").lower().strip()
+        if mode not in ("normal", "aggressive"):
+            mode = "normal"
+        self.data["settings"]["enforcement_mode"] = mode
+        await self._save_db()
+
+    async def record_enforcement_check(self, passed: bool, revoked: bool = False, user_id: int = 0, persist: bool = True):
+        """Track force-subscription enforcement metrics."""
+        enforcement = self.data.setdefault("enforcement", {
+            "checks": 0,
+            "failed_checks": 0,
+            "revoked_access": 0,
+            "last_revoked_at": "",
+            "last_revoked_user": 0
+        })
+        enforcement["checks"] = int(enforcement.get("checks", 0)) + 1
+        if not passed:
+            enforcement["failed_checks"] = int(enforcement.get("failed_checks", 0)) + 1
+        if revoked:
+            enforcement["revoked_access"] = int(enforcement.get("revoked_access", 0)) + 1
+            enforcement["last_revoked_at"] = datetime.now().isoformat()
+            enforcement["last_revoked_user"] = int(user_id or 0)
+        if persist:
+            await self._save_db()
+
+    async def get_enforcement_stats(self):
+        """Get enforcement metrics summary."""
+        enforcement = self.data.get("enforcement", {})
+        return {
+            "checks": int(enforcement.get("checks", 0)),
+            "failed_checks": int(enforcement.get("failed_checks", 0)),
+            "revoked_access": int(enforcement.get("revoked_access", 0)),
+            "last_revoked_at": enforcement.get("last_revoked_at", ""),
+            "last_revoked_user": int(enforcement.get("last_revoked_user", 0)),
+            "mode": await self.get_enforcement_mode()
+        }
     
     # ================== STATS ==================
     
@@ -399,7 +463,9 @@ class Database:
             "fsub_channels": len(self.data["fsub_channels"]),
             "total_uploads": self.data["bot_stats"]["total_uploads"],
             "total_size": self.data["bot_stats"]["total_size_uploaded"],
-            "start_time": self.data["bot_stats"]["start_time"]
+            "start_time": self.data["bot_stats"]["start_time"],
+            "enforcement_mode": await self.get_enforcement_mode(),
+            "enforcement": await self.get_enforcement_stats()
         }
 
     # ================== ANALYTICS ==================
@@ -534,6 +600,17 @@ class Database:
             filename = self.data.get("bot_stats", {}).get("username_export_file", "")
         db_dir = os.path.dirname(self.db_file) or "."
         return os.path.abspath(os.path.join(db_dir, filename)) if filename else ""
+
+    async def get_recent_user_events(self, limit: int = 20, event_types: list = None):
+        """Get recent global events, optionally filtered by event type(s)."""
+        limit = max(1, min(200, int(limit)))
+        events = self.data.get("user_events", [])
+        if event_types:
+            allowed = {str(x) for x in event_types}
+            filtered = [e for e in events if e.get("event_type") in allowed]
+        else:
+            filtered = list(events)
+        return filtered[-limit:][::-1]
 
 # Global database instance
 db = Database()
