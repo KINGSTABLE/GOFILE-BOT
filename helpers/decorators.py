@@ -10,7 +10,7 @@ def admin_only(func):
     @wraps(func)
     async def wrapper(client: Client, update, *args, **kwargs):
         is_callback = isinstance(update, CallbackQuery)
-        if isinstance(update, CallbackQuery):
+        if is_callback:
             user_id = update.from_user.id
             reply_func = update.answer
         else:
@@ -40,7 +40,7 @@ def owner_only(func):
     @wraps(func)
     async def wrapper(client: Client, update, *args, **kwargs):
         is_callback = isinstance(update, CallbackQuery)
-        if isinstance(update, CallbackQuery):
+        if is_callback:
             user_id = update.from_user.id
             reply_func = update.answer
         else:
@@ -70,7 +70,7 @@ def not_banned(func):
     @wraps(func)
     async def wrapper(client: Client, update, *args, **kwargs):
         is_callback = isinstance(update, CallbackQuery)
-        if isinstance(update, CallbackQuery):
+        if is_callback:
             user_id = update.from_user.id
             reply_func = update.answer
         else:
