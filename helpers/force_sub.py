@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-from pyrogram import Client
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import UserNotParticipant, ChatAdminRequired, PeerIdInvalid
+try:
+    from pyrofork import Client
+    from pyrofork.types import InlineKeyboardMarkup, InlineKeyboardButton
+    from pyrofork.errors import UserNotParticipant, ChatAdminRequired, PeerIdInvalid
+except ImportError:
+    from pyrogram import Client
+    from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    from pyrogram.errors import UserNotParticipant, ChatAdminRequired, PeerIdInvalid
 from database import db
-from config import REQUIRED_FSUB_CHANNELS, SUPPORT_CHAT
+from config import SUPPORT_CHAT
 import logging
 
 logger = logging.getLogger(__name__)
@@ -46,14 +51,6 @@ async def check_force_sub(client: Client, user_id: int) -> tuple:
     Returns: (is_subscribed: bool, missing_channels: list)
     """
     channels = await db.get_fsub_channels()
-    mandatory = set(REQUIRED_FSUB_CHANNELS)
-    for channel_id in mandatory:
-        if not any(ch.get("id") == channel_id for ch in channels):
-            channels.append({
-                "id": channel_id,
-                "name": f"Required Channel {channel_id}",
-                "link": ""
-            })
     missing_channels = []
     
     for channel in channels:

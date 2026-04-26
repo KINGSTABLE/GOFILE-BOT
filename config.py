@@ -23,15 +23,17 @@ BACKUP_CHANNEL_ID = sanitize_channel_id(os.environ.get("BACKUP_CHANNEL_ID"))
 LOG_CHANNEL_ID = sanitize_channel_id(os.environ.get("LOG_CHANNEL_ID"))
 
 def parse_required_channels() -> list:
-    raw = os.environ.get("REQUIRED_FSUB_CHANNELS", "2642665601 -1002415257460")
+    raw = os.environ.get("REQUIRED_FSUB_CHANNELS", "")
     parsed = []
     for token in raw.replace(",", " ").split():
         channel_id = sanitize_channel_id(token)
         if channel_id is not None and channel_id not in parsed:
             parsed.append(channel_id)
     return parsed
-
+ 
 REQUIRED_FSUB_CHANNELS = parse_required_channels()
+# Default FSUB channel seed used at startup when not already configured in DB.
+DEFAULT_FSUB_CHANNEL = os.environ.get("DEFAULT_FSUB_CHANNEL", "@TOOLS_BOTS_KING").strip()
 
 # Parse admin IDs
 ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split() if x.isdigit()]
