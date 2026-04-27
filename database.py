@@ -51,7 +51,8 @@ class Database:
                 "last_revoked_at": "",
                 "last_revoked_user": 0
             },
-            "user_events": []
+            "user_events": [],
+            "admin_channels": []
         }
         
         if os.path.exists(self.db_file):
@@ -70,6 +71,8 @@ class Database:
                         loaded["bot_stats"]["last_username_export_at"] = ""
                     if "user_events" not in loaded:
                         loaded["user_events"] = []
+                    if "admin_channels" not in loaded:
+                        loaded["admin_channels"] = []
                     settings = loaded.get("settings", {})
                     if "enforcement_mode" not in settings:
                         settings["enforcement_mode"] = "normal"
@@ -366,8 +369,51 @@ class Database:
         if changed:
             await self._save_db()
     
+    # ================== ADMIN CHANNELS ==================
+
+    async def add_admin_channel(self, channel_id: int, channel_name: str = "") -> bool:
+        """Add/update a channel where the bot is admin.
+
+        Returns True when a new channel record is created, False when an existing
+        record is updated.
+        """
+        channel_id = int(channel_id)
+        channels = self.data.setdefault("admin_channels", [])
+        for ch in channels:
+            if int(ch.get("id", 0)) == channel_id:
+                if channel_name:
+                    existing = ch.get("name", "")
+                    if existing != channel_name:
+                        ch["name"] = channel_name
+                        await self._save_db()
+                return False
+        channels.append({
+            "id": channel_id,
+            "name": channel_name or f"Channel {channel_id}",
+            "added_date": datetime.now().isoformat()
+        })
+        await self._save_db()
+        return True
+
+    async def remove_admin_channel(self, channel_id: int) -> bool:
+        """Remove channel from admin channel records."""
+        channel_id = int(channel_id)
+        before = len(self.data.setdefault("admin_channels", []))
+        self.data["admin_channels"] = [
+            ch for ch in self.data["admin_channels"]
+            if int(ch.get("id", 0)) != channel_id
+        ]
+        changed = len(self.data["admin_channels"]) < before
+        if changed:
+            await self._save_db()
+        return changed
+
+    async def get_admin_channels(self) -> list:
+        """Get channels where bot is known as admin."""
+        return list(self.data.get("admin_channels", []))
+
     # ================== ADS MANAGEMENT ==================
-    
+
     async def set_ads(self, enabled: bool, message: str = "", button_text: str = "", button_url: str = ""):
         """Set advertisement"""
         self.data["ads"] = {
