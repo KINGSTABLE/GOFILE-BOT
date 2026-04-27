@@ -271,13 +271,11 @@ async def ensure_default_fsub_channel(client: Client):
     except Exception as e:
         logger.warning(f"Could not resolve default FSUB channel {target}: {e}")
         return
-    if any(int(ch.get("id", 0)) == int(resolved["id"]) for ch in channels):
-        if resolved.get("is_admin"):
-            await db.add_admin_channel(int(resolved["id"]), resolved["name"])
-        return
-    await db.add_fsub_channel(resolved["id"], resolved["name"], "")
     if resolved.get("is_admin"):
         await db.add_admin_channel(int(resolved["id"]), resolved["name"])
+    if any(int(ch.get("id", 0)) == int(resolved["id"]) for ch in channels):
+        return
+    await db.add_fsub_channel(resolved["id"], resolved["name"], "")
 
 @app.on_my_chat_member_updated()
 async def track_admin_channels_on_membership_update(client: Client, update):
@@ -292,7 +290,7 @@ async def track_admin_channels_on_membership_update(client: Client, update):
             return
         chat_id = int(chat.id)
         new_member = getattr(update, "new_chat_member", None)
-        status = str(getattr(new_member, "status", "")).lower() if new_member else ""
+        status = getattr(new_member, "status", "").lower() if new_member else ""
         if status in ("administrator", "creator"):
             await db.add_admin_channel(chat_id, chat.title or f"Channel {chat_id}")
         else:
