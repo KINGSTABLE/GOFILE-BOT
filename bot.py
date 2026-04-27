@@ -63,6 +63,7 @@ ADMIN_WIZARDS = {}
 ACTION_UNDO = {}
 LIST_PAGE_SIZE = 10
 MAX_CHANNEL_NAME_DISPLAY_LENGTH = 45
+TELEGRAM_CHANNEL_ID_THRESHOLD = -1000000000000
 ADMIN_TEXT_COMMANDS = [
     "start", "help", "stats", "ping", "about", "analytics", "usernamefile", "broadcast",
     "users", "ban", "unban", "banned", "user", "addfsub", "remfsub", "fsub", "setad",
@@ -136,7 +137,31 @@ def is_valid_http_url(url: str) -> bool:
         return False
 
 def is_supported_fsub_chat_type(chat_type) -> bool:
-    return str(chat_type).lower() in ("channel", "supergroup")
+    normalized = str(chat_type).lower()
+    if normalized in ("channel", "supergroup"):
+        return True
+    return normalized.endswith(".channel") or normalized.endswith(".supergroup")
+
+def get_channel_id_candidates(channel_id: int) -> list:
+    """Generate compatible channel-id variants (e.g. 123 -> -100123, and reverse)."""
+    base_id = int(channel_id)
+    candidates = [base_id]
+    if base_id > 0:
+        candidates.append(int(f"-100{base_id}"))
+    if base_id < TELEGRAM_CHANNEL_ID_THRESHOLD:
+        abs_id = str(abs(base_id))
+        if len(abs_id) <= 3:
+            return list(dict.fromkeys(candidates))
+        trimmed = abs_id[3:]
+        if trimmed.isdigit():
+            candidates.append(int(trimmed))
+    return list(dict.fromkeys(candidates))
+
+def is_admin_member_status(status) -> bool:
+    normalized = str(status).lower()
+    if normalized in ("administrator", "creator"):
+        return True
+    return normalized.endswith(".administrator") or normalized.endswith(".creator")
 
 def normalize_channel_reference(raw: str):
     value = (raw or "").strip()
@@ -167,14 +192,32 @@ def normalize_channel_reference(raw: str):
 
 async def resolve_fsub_channel(client: Client, raw_reference: str) -> dict:
     ref, ref_type = normalize_channel_reference(raw_reference)
-    chat = await client.get_chat(ref)
+    candidates = [ref]
+    if ref_type == "chat_id":
+        candidates = get_channel_id_candidates(int(ref))
+
+    chat = None
+    last_error = None
+    for candidate in candidates:
+        try:
+            chat = await client.get_chat(candidate)
+            break
+        except Exception as e:
+            last_error = e
+            continue
+
+    if not chat:
+        if last_error:
+            raise last_error
+        raise ValueError(f"Unable to resolve channel reference: {raw_reference} (tried: {', '.join(map(str, candidates))})")
+
     if not is_supported_fsub_chat_type(chat.type):
         raise ValueError("Only channels/supergroups are supported for FSub.")
 
     me = await client.get_me()
     member = await client.get_chat_member(chat.id, me.id)
     member_status = getattr(member, "status", "")
-    is_admin = member_status in ("administrator", "creator")
+    is_admin = is_admin_member_status(member_status)
     if is_admin:
         await db.add_admin_channel(int(chat.id), chat.title or f"Channel {chat.id}")
     return {
@@ -210,6 +253,7 @@ async def create_fsub_invite_link(client: Client, channel_id: int, days: int = 0
 async def list_bot_admin_channels(client: Client, limit: int = 30) -> list:
     channels = await db.get_admin_channels()
     cleaned = []
+    seen_ids = set()
     for ch in channels:
         try:
             chat_id = int(ch.get("id", 0))
@@ -222,11 +266,42 @@ async def list_bot_admin_channels(client: Client, limit: int = 30) -> list:
             "id": chat_id,
             "name": ch.get("name", f"Channel {chat_id}")
         })
-    cleaned.sort(key=lambda x: str(x.get("name", "")).lower())
+        seen_ids.add(chat_id)
     try:
         safe_limit = max(1, int(limit))
     except Exception:
         safe_limit = 30
+
+    # Backfill from current dialogs when cache is stale/empty.
+    if len(cleaned) == 0:
+        try:
+            me = await client.get_me()
+            async for dialog in client.get_dialogs():
+                chat = getattr(dialog, "chat", None)
+                if not chat:
+                    continue
+                if not is_supported_fsub_chat_type(getattr(chat, "type", "")):
+                    continue
+                chat_id = int(chat.id)
+                if chat_id in seen_ids:
+                    continue
+                try:
+                    member = await client.get_chat_member(chat_id, me.id)
+                    if not is_admin_member_status(getattr(member, "status", "")):
+                        continue
+                except Exception:
+                    continue
+
+                record = {"id": chat_id, "name": chat.title or f"Channel {chat_id}"}
+                cleaned.append(record)
+                seen_ids.add(chat_id)
+                await db.add_admin_channel(record["id"], record["name"])
+                if len(cleaned) >= safe_limit:
+                    break
+        except Exception as e:
+            logger.debug(f"Could not backfill admin channels from dialogs: {e}")
+
+    cleaned.sort(key=lambda x: str(x.get("name", "")).lower())
     return cleaned[:safe_limit]
 
 async def seed_admin_channels(client: Client):
@@ -252,7 +327,7 @@ async def seed_admin_channels(client: Client):
             continue
         try:
             member = await client.get_chat_member(chat_id, me.id)
-            if getattr(member, "status", "") not in ("administrator", "creator"):
+            if not is_admin_member_status(getattr(member, "status", "")):
                 continue
             chat = await client.get_chat(chat_id)
             if is_supported_fsub_chat_type(chat.type):
@@ -289,8 +364,8 @@ async def track_admin_channels_on_membership_update(client: Client, update):
             return
         chat_id = int(chat.id)
         new_member = getattr(update, "new_chat_member", None)
-        status = getattr(new_member, "status", "").lower() if new_member else ""
-        if status in ("administrator", "creator"):
+        status = getattr(new_member, "status", "") if new_member else ""
+        if is_admin_member_status(status):
             await db.add_admin_channel(chat_id, chat.title or f"Channel {chat_id}")
         else:
             await db.remove_admin_channel(chat_id)
