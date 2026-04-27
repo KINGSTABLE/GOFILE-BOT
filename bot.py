@@ -1187,9 +1187,10 @@ async def banned_list_callback(client: Client, callback: CallbackQuery):
         chunk = banned[start:end]
         total_pages = max(1, (total + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
         banned_lines = [f"• `{strip_markdown_formatting(str(user_id))}`" for user_id in chunk]
+        banned_text = "\n".join(banned_lines)
         text = (
             "🚫 **Banned Users**\n\n"
-            f"{'\n'.join(banned_lines)}\n\n"
+            f"{banned_text}\n\n"
             f"_Page {page + 1}/{total_pages} • Total {total}_"
         )
         nav = []
