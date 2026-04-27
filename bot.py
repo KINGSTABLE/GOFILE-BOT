@@ -277,7 +277,6 @@ async def ensure_default_fsub_channel(client: Client):
         return
     await db.add_fsub_channel(resolved["id"], resolved["name"], "")
 
-@app.on_my_chat_member_updated()
 async def track_admin_channels_on_membership_update(client: Client, update):
     """Track channels where the bot gains/loses admin privileges.
 
@@ -297,6 +296,13 @@ async def track_admin_channels_on_membership_update(client: Client, update):
             await db.remove_admin_channel(chat_id)
     except Exception as e:
         logger.warning(f"Could not sync admin channel from membership update: {e}")
+
+if hasattr(app, "on_my_chat_member_updated"):
+    app.on_my_chat_member_updated()(track_admin_channels_on_membership_update)
+elif hasattr(app, "on_chat_member_updated"):
+    app.on_chat_member_updated()(track_admin_channels_on_membership_update)
+else:
+    logger.warning("Chat member update handlers are not available in this Pyrogram build.")
 
 async def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS or user_id == OWNER_ID
