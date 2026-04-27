@@ -222,14 +222,22 @@ async def list_bot_admin_channels(client: Client, limit: int = 30) -> list:
             "name": ch.get("name", f"Channel {chat_id}")
         })
     cleaned.sort(key=lambda x: str(x.get("name", "")).lower())
-    return cleaned[:max(int(limit), 1)]
+    try:
+        safe_limit = max(1, int(limit))
+    except Exception:
+        safe_limit = 30
+    return cleaned[:safe_limit]
 
 async def seed_admin_channels(client: Client):
     me = await client.get_me()
     seed_ids = set()
     for raw_id in [BACKUP_CHANNEL_ID, LOG_CHANNEL_ID]:
-        if isinstance(raw_id, int) and raw_id != 0:
-            seed_ids.add(int(raw_id))
+        try:
+            parsed_id = int(raw_id)
+            if parsed_id != 0:
+                seed_ids.add(parsed_id)
+        except Exception:
+            continue
     for ch in await db.get_fsub_channels():
         try:
             seed_ids.add(int(ch.get("id", 0)))
@@ -269,6 +277,11 @@ async def ensure_default_fsub_channel(client: Client):
 
 @app.on_my_chat_member_updated()
 async def track_admin_channels_on_membership_update(client: Client, update):
+    """Track channels where the bot gains/loses admin privileges.
+
+    Adds channel to admin picker when new membership status becomes
+    administrator/creator, and removes it when bot is demoted or removed.
+    """
     try:
         chat = getattr(update, "chat", None)
         if not chat or not is_supported_fsub_chat_type(getattr(chat, "type", "")):

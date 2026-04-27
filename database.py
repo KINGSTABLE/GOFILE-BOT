@@ -372,7 +372,11 @@ class Database:
     # ================== ADMIN CHANNELS ==================
 
     async def add_admin_channel(self, channel_id: int, channel_name: str = "") -> bool:
-        """Add/update a channel where the bot is admin."""
+        """Add/update a channel where the bot is admin.
+
+        Returns True when a new channel record is created, False when an existing
+        record is updated.
+        """
         channel_id = int(channel_id)
         channels = self.data.setdefault("admin_channels", [])
         for ch in channels:
