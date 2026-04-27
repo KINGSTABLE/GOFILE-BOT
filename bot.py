@@ -802,15 +802,9 @@ async def about_command(client: Client, message: Message):
     if not await force_sub_check(client, message):
         return
     
-    bot_stats = await db.get_bot_stats()
-    
     about_text = (
         "ℹ️ **About This Bot**\n\n"
-        f"🤖 **Bot Name:** GoFile Uploader\n"
-        f"⚡ **Engine:** uvloop (High Performance)\n"
-        f"👥 **Total Users:** {bot_stats['total_users']}\n"
-        f"📤 **Total Uploads:** {bot_stats['total_uploads']}\n"
-        f"💾 **Data Processed:** {human_readable_size(bot_stats['total_size'])}\n\n"
+        "🤖 **Bot Name:** GoFile Uploader\n"
         "🔧 **Developer:** @TG_Bot_Support_bot\n"
         "📅 **Version:** 2.0.0"
     )
