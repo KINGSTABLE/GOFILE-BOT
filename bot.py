@@ -2034,7 +2034,7 @@ async def admin_safety_logs_callback(client: Client, callback: CallbackQuery):
     ])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
-@app.on_message(filters.private & ~filters.command(ADMIN_TEXT_COMMANDS))
+@app.on_message(filters.private & ~filters.command(ADMIN_TEXT_COMMANDS), group=1)
 async def admin_wizard_input_handler(client: Client, message: Message):
     if not message.from_user or not await is_admin(message.from_user.id):
         return
@@ -2797,4 +2797,3 @@ if __name__ == "__main__":
     loop = asyncio.get_event_loop()
 
     loop.run_until_complete(main())
-
