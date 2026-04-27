@@ -175,6 +175,8 @@ async def resolve_fsub_channel(client: Client, raw_reference: str) -> dict:
     member = await client.get_chat_member(chat.id, me.id)
     member_status = getattr(member, "status", "")
     is_admin = member_status in ("administrator", "creator")
+    if is_admin:
+        await db.add_admin_channel(int(chat.id), chat.title or f"Channel {chat.id}")
     return {
         "id": int(chat.id),
         "name": chat.title or f"Channel {chat.id}",
@@ -206,31 +208,46 @@ async def create_fsub_invite_link(client: Client, channel_id: int, days: int = 0
             return ""
 
 async def list_bot_admin_channels(client: Client, limit: int = 30) -> list:
-    me = await client.get_me()
-    channels = []
-    seen = set()
-    async for dialog in client.get_dialogs(limit=200):
-        chat = getattr(dialog, "chat", None)
-        if not chat:
-            continue
-        if not is_supported_fsub_chat_type(chat.type):
-            continue
-        chat_id = int(chat.id)
-        if chat_id in seen:
-            continue
-        seen.add(chat_id)
+    channels = await db.get_admin_channels()
+    cleaned = []
+    for ch in channels:
         try:
-            member = await client.get_chat_member(chat_id, me.id)
-            if getattr(member, "status", "") in ("administrator", "creator"):
-                channels.append({
-                    "id": chat_id,
-                    "name": chat.title or f"Channel {chat_id}"
-                })
+            chat_id = int(ch.get("id", 0))
         except Exception:
             continue
-        if len(channels) >= int(limit):
-            break
-    return channels
+        if not chat_id:
+            continue
+        cleaned.append({
+            "id": chat_id,
+            "name": ch.get("name", f"Channel {chat_id}")
+        })
+    cleaned.sort(key=lambda x: str(x.get("name", "")).lower())
+    return cleaned[:max(int(limit), 1)]
+
+async def seed_admin_channels(client: Client):
+    me = await client.get_me()
+    seed_ids = set()
+    for raw_id in [BACKUP_CHANNEL_ID, LOG_CHANNEL_ID]:
+        if isinstance(raw_id, int) and raw_id != 0:
+            seed_ids.add(int(raw_id))
+    for ch in await db.get_fsub_channels():
+        try:
+            seed_ids.add(int(ch.get("id", 0)))
+        except Exception:
+            continue
+
+    for chat_id in seed_ids:
+        if not chat_id:
+            continue
+        try:
+            member = await client.get_chat_member(chat_id, me.id)
+            if getattr(member, "status", "") not in ("administrator", "creator"):
+                continue
+            chat = await client.get_chat(chat_id)
+            if is_supported_fsub_chat_type(chat.type):
+                await db.add_admin_channel(int(chat.id), chat.title or f"Channel {chat.id}")
+        except Exception:
+            continue
 
 async def ensure_default_fsub_channel(client: Client):
     target = (DEFAULT_FSUB_CHANNEL or "").strip()
@@ -243,8 +260,27 @@ async def ensure_default_fsub_channel(client: Client):
         logger.warning(f"Could not resolve default FSUB channel {target}: {e}")
         return
     if any(int(ch.get("id", 0)) == int(resolved["id"]) for ch in channels):
+        if resolved.get("is_admin"):
+            await db.add_admin_channel(int(resolved["id"]), resolved["name"])
         return
     await db.add_fsub_channel(resolved["id"], resolved["name"], "")
+    if resolved.get("is_admin"):
+        await db.add_admin_channel(int(resolved["id"]), resolved["name"])
+
+@app.on_my_chat_member_updated()
+async def track_admin_channels_on_membership_update(client: Client, update):
+    try:
+        chat = getattr(update, "chat", None)
+        if not chat or not is_supported_fsub_chat_type(getattr(chat, "type", "")):
+            return
+        chat_id = int(chat.id)
+        status = str(getattr(getattr(update, "new_chat_member", None), "status", "")).lower()
+        if status in ("administrator", "creator"):
+            await db.add_admin_channel(chat_id, chat.title or f"Channel {chat_id}")
+        else:
+            await db.remove_admin_channel(chat_id)
+    except Exception as e:
+        logger.warning(f"Could not sync admin channel from membership update: {e}")
 
 async def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS or user_id == OWNER_ID
@@ -2640,6 +2676,7 @@ async def main():
     await db.get_username_export_file_path()
     await app.start()
     await ensure_default_fsub_channel(app)
+    await seed_admin_channels(app)
     for i in range(MAX_CONCURRENT_QUEUE_WORKERS):
         queue_worker_tasks.append(asyncio.create_task(queue_worker(app, i)))
     print(f"⚙️ Started {MAX_CONCURRENT_QUEUE_WORKERS} concurrent queue workers.")
