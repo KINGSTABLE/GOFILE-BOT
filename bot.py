@@ -63,6 +63,7 @@ ADMIN_WIZARDS = {}
 ACTION_UNDO = {}
 LIST_PAGE_SIZE = 10
 MAX_CHANNEL_NAME_DISPLAY_LENGTH = 45
+TELEGRAM_CHANNEL_ID_THRESHOLD = -1000000000000
 ADMIN_TEXT_COMMANDS = [
     "start", "help", "stats", "ping", "about", "analytics", "usernamefile", "broadcast",
     "users", "ban", "unban", "banned", "user", "addfsub", "remfsub", "fsub", "setad",
@@ -142,12 +143,16 @@ def is_supported_fsub_chat_type(chat_type) -> bool:
     return normalized.endswith(".channel") or normalized.endswith(".supergroup")
 
 def get_channel_id_candidates(channel_id: int) -> list:
-    """Try useful Telegram channel-id variants for compatibility."""
-    candidates = [int(channel_id)]
-    if int(channel_id) > 0:
-        candidates.append(int(f"-100{int(channel_id)}"))
-    if int(channel_id) < -1000000000000:
-        trimmed = str(abs(int(channel_id)))[3:]
+    """Generate compatible channel-id variants (e.g. 123 -> -100123, and reverse)."""
+    base_id = int(channel_id)
+    candidates = [base_id]
+    if base_id > 0:
+        candidates.append(int(f"-100{base_id}"))
+    if base_id < TELEGRAM_CHANNEL_ID_THRESHOLD:
+        abs_id = str(abs(base_id))
+        if len(abs_id) <= 3:
+            return list(dict.fromkeys(candidates))
+        trimmed = abs_id[3:]
         if trimmed.isdigit():
             candidates.append(int(trimmed))
     return list(dict.fromkeys(candidates))
@@ -204,7 +209,7 @@ async def resolve_fsub_channel(client: Client, raw_reference: str) -> dict:
     if not chat:
         if last_error:
             raise last_error
-        raise ValueError("Unable to resolve channel reference.")
+        raise ValueError(f"Unable to resolve channel reference: {raw_reference} (tried: {', '.join(map(str, candidates))})")
 
     if not is_supported_fsub_chat_type(chat.type):
         raise ValueError("Only channels/supergroups are supported for FSub.")
@@ -262,14 +267,13 @@ async def list_bot_admin_channels(client: Client, limit: int = 30) -> list:
             "name": ch.get("name", f"Channel {chat_id}")
         })
         seen_ids.add(chat_id)
-    cleaned.sort(key=lambda x: str(x.get("name", "")).lower())
     try:
         safe_limit = max(1, int(limit))
     except Exception:
         safe_limit = 30
 
     # Backfill from current dialogs when cache is stale/empty.
-    if len(cleaned) < safe_limit:
+    if len(cleaned) == 0:
         try:
             me = await client.get_me()
             async for dialog in client.get_dialogs():
