@@ -29,14 +29,27 @@ async def check_subscription(client: Client, user_id: int, channel_id: int) -> b
     for candidate in get_channel_candidates(channel_id):
         try:
             member = await client.get_chat_member(candidate, user_id)
-            if member.status in ["left", "kicked", "banned"]:
+            # pyrofork returns enum types (e.g. ChatMemberStatus.left) rather than plain strings.
+            # Normalise to lowercase string and check both plain and dotted forms.
+            normalized_status = str(member.status).lower()
+            non_member_statuses = {"left", "kicked", "banned"}
+            is_non_member = (
+                normalized_status in non_member_statuses
+                or any(normalized_status.endswith(f".{s}") for s in non_member_statuses)
+            )
+            if is_non_member:
                 continue
             return True
         except UserNotParticipant:
             continue
         except ChatAdminRequired:
-            logger.error(f"Bot must be added as admin in channel {candidate} to enforce subscription requirements.")
-            return False
+            # Bot is not admin in this channel — cannot verify membership.
+            # Log the error but pass the user through rather than blocking everyone.
+            logger.warning(
+                f"Bot lacks admin rights in channel {candidate} — cannot verify membership. "
+                f"Granting access to avoid blocking all users. Please make the bot an admin."
+            )
+            return True
         except PeerIdInvalid:
             logger.warning(f"Invalid channel ID variant: {candidate}")
             continue
