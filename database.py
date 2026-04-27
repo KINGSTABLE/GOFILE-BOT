@@ -381,7 +381,8 @@ class Database:
         channels = self.data.setdefault("admin_channels", [])
         for ch in channels:
             if int(ch.get("id", 0)) == channel_id:
-                ch["name"] = channel_name or ch.get("name") or f"Channel {channel_id}"
+                if channel_name:
+                    ch["name"] = channel_name
                 await self._save_db()
                 return False
         channels.append({

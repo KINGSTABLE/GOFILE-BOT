@@ -287,7 +287,8 @@ async def track_admin_channels_on_membership_update(client: Client, update):
         if not chat or not is_supported_fsub_chat_type(getattr(chat, "type", "")):
             return
         chat_id = int(chat.id)
-        status = str(getattr(getattr(update, "new_chat_member", None), "status", "")).lower()
+        new_member = getattr(update, "new_chat_member", None)
+        status = str(getattr(new_member, "status", "")).lower() if new_member else ""
         if status in ("administrator", "creator"):
             await db.add_admin_channel(chat_id, chat.title or f"Channel {chat_id}")
         else:
