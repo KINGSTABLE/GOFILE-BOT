@@ -2444,20 +2444,28 @@ async def process_tg_file(client, media, message, status_msg):
     file_name = getattr(media, "file_name", f"file_{message.id}_{int(time.time())}")
     file_path = os.path.join(DOWNLOAD_DIR, file_name)
 
-    await status_msg.edit_text(
-        f"⬇️ **Downloading...**\n\n"
-        f"📄 **File:** `{file_name}`\n"
-        f"📦 **Size:** `{human_readable_size(media.file_size)}`\n"
-        f"⚡ **Mode:** Native Stream"
-    )
+    try:
+        await status_msg.edit_text(
+            f"⬇️ **Downloading...**\n\n"
+            f"📄 **File:** `{file_name}`\n"
+            f"📦 **Size:** `{human_readable_size(media.file_size)}`\n"
+            f"⚡ **Mode:** Native Stream"
+        )
 
-    await client.download_media(message, file_path)
+        await client.download_media(message, file_path)
 
-    await upload_handler(
-        client, message, status_msg,
-        file_path, media.file_size,
-        file_name, "Telegram File"
-    )
+        await upload_handler(
+            client, message, status_msg,
+            file_path, media.file_size,
+            file_name, "Telegram File"
+        )
+    except Exception:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError as cleanup_error:
+                logger.warning(f"Failed to remove tg file {file_path}: {cleanup_error}")
+        raise
 
 async def process_url_file(client, url, message, status_msg):
     try:
@@ -2470,29 +2478,37 @@ async def process_url_file(client, url, message, status_msg):
         
     file_path = os.path.join(DOWNLOAD_DIR, file_name)
 
-    await status_msg.edit_text(
-        "⬇️ **Fast Downloading...**\n\n"
-        f"🔗 **URL:** `{url[:50]}...`\n"
-        "⏳ **Mode:** Optimized HTTP Stream"
-    )
+    try:
+        await status_msg.edit_text(
+            "⬇️ **Fast Downloading...**\n\n"
+            f"🔗 **URL:** `{url[:50]}...`\n"
+            "⏳ **Mode:** Optimized HTTP Stream"
+        )
 
-    connector = aiohttp.TCPConnector(limit=None, ttl_dns_cache=300)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        async with session.get(url, timeout=None) as response:
-            if response.status != 200:
-                return await status_msg.edit_text(f"❌ URL Error: {response.status}")
-            
-            with open(file_path, "wb") as f:
-                async for chunk in response.content.iter_chunked(CHUNK_SIZE):
-                    f.write(chunk)
+        connector = aiohttp.TCPConnector(limit=None, ttl_dns_cache=300)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            async with session.get(url, timeout=None) as response:
+                if response.status != 200:
+                    return await status_msg.edit_text(f"❌ URL Error: {response.status}")
+                
+                with open(file_path, "wb") as f:
+                    async for chunk in response.content.iter_chunked(CHUNK_SIZE):
+                        f.write(chunk)
 
-    final_size = os.path.getsize(file_path)
-    
-    await upload_handler(
-        client, message, status_msg,
-        file_path, final_size,
-        file_name, "HTTP URL"
-    )
+        final_size = os.path.getsize(file_path)
+        
+        await upload_handler(
+            client, message, status_msg,
+            file_path, final_size,
+            file_name, "HTTP URL"
+        )
+    except Exception:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError as cleanup_error:
+                logger.warning(f"Failed to remove url file {file_path}: {cleanup_error}")
+        raise
 
 # ================== UPLOAD & FINAL LOGGING ==================
 
