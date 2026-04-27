@@ -382,8 +382,10 @@ class Database:
         for ch in channels:
             if int(ch.get("id", 0)) == channel_id:
                 if channel_name:
-                    ch["name"] = channel_name
-                await self._save_db()
+                    existing = ch.get("name", "")
+                    if existing != channel_name:
+                        ch["name"] = channel_name
+                        await self._save_db()
                 return False
         channels.append({
             "id": channel_id,

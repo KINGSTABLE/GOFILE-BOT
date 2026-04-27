@@ -213,7 +213,8 @@ async def list_bot_admin_channels(client: Client, limit: int = 30) -> list:
     for ch in channels:
         try:
             chat_id = int(ch.get("id", 0))
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Skipping malformed admin channel entry {ch}: {e}")
             continue
         if not chat_id:
             continue
@@ -236,12 +237,14 @@ async def seed_admin_channels(client: Client):
             parsed_id = int(raw_id)
             if parsed_id != 0:
                 seed_ids.add(parsed_id)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Skipping invalid configured channel id {raw_id}: {e}")
             continue
     for ch in await db.get_fsub_channels():
         try:
             seed_ids.add(int(ch.get("id", 0)))
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Skipping malformed fsub channel entry {ch}: {e}")
             continue
 
     for chat_id in seed_ids:
@@ -254,7 +257,8 @@ async def seed_admin_channels(client: Client):
             chat = await client.get_chat(chat_id)
             if is_supported_fsub_chat_type(chat.type):
                 await db.add_admin_channel(int(chat.id), chat.title or f"Channel {chat.id}")
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Could not seed admin channel {chat_id}: {e}")
             continue
 
 async def ensure_default_fsub_channel(client: Client):
